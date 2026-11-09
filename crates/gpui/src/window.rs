@@ -1267,6 +1267,7 @@ pub struct Window {
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
+    zoom_factor: f32,
     pub(crate) bounds_observers: SingleSubscriberSet<AnyObserver>,
     appearance: WindowAppearance,
     pub(crate) appearance_observers: SingleSubscriberSet<AnyObserver>,
@@ -2242,7 +2243,10 @@ impl Window {
             let mut cx = cx.to_async();
             Box::new(move |event| {
                 handle
-                    .update(&mut cx, |_, window, cx| window.dispatch_event(event, cx))
+                    .update(&mut cx, |_, window, cx| {
+                        let event = event.unzoom(window.zoom_factor);
+                        window.dispatch_event(event, cx)
+                    })
                     .with_context(|| {
                         format!("dispatching input for window {:?}", handle.window_id())
                     })
@@ -2390,6 +2394,7 @@ impl Window {
             modifiers,
             capslock,
             scale_factor,
+            zoom_factor: 1.0,
             bounds_observers: SingleSubscriberSet::new(),
             appearance,
             appearance_observers: SingleSubscriberSet::new(),
@@ -2731,7 +2736,13 @@ impl Window {
     /// - `Some(&[])` is an empty region, so the window receives no pointer or touch input.
     /// - `None` resets the region to the default, so the whole window receives input again.
     pub fn set_input_region(&self, region: Option<&[Bounds<Pixels>]>) {
-        self.platform_window.set_input_region(region);
+        let region: Option<Vec<Bounds<Pixels>>> = region.map(|rects| {
+            rects
+                .iter()
+                .map(|rect| rect.map(|value| value * self.zoom_factor))
+                .collect()
+        });
+        self.platform_window.set_input_region(region.as_deref());
     }
 
     /// Return the `WindowBounds` to indicate that how a window should be opened
@@ -3001,9 +3012,9 @@ impl Window {
     /// the platform window, then notifies observers. Normally called automatically
     /// by the platform's resize callback, but exposed publicly for test infrastructure.
     pub fn bounds_changed(&mut self, cx: &mut App) {
-        self.scale_factor = self.platform_window.scale_factor();
-        self.viewport_size = self.platform_window.content_size();
-        self.mouse_position = self.platform_window.mouse_position();
+        self.scale_factor = self.platform_window.scale_factor() * self.zoom_factor;
+        self.viewport_size = self.platform_window.content_size() / self.zoom_factor;
+        self.mouse_position = self.platform_window.mouse_position() / self.zoom_factor;
 
         self.refresh();
 
@@ -3085,7 +3096,13 @@ impl Window {
 
     /// Returns the regions of this window obscured by system UI and the keyboard.
     pub fn insets(&self) -> WindowInsets {
-        self.platform_window.insets()
+        let insets = self.platform_window.insets();
+        let unzoom = |value: &Pixels| *value / self.zoom_factor;
+        WindowInsets {
+            safe_area: insets.safe_area.map(unzoom),
+            ime: insets.ime.map(unzoom),
+            corner_radii: insets.corner_radii.map(unzoom),
+        }
     }
 
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
@@ -3166,7 +3183,7 @@ impl Window {
     /// During drawing this is a consistent frame snapshot. Outside drawing it
     /// reflects the latest platform sample, not a synchronous geometry query.
     pub fn visual_viewport_bounds(&self) -> Bounds<Pixels> {
-        self.platform_window.visual_viewport_bounds()
+        self.platform_window.visual_viewport_bounds() / self.zoom_factor
     }
 
     /// Returns a conservative rectangle avoiding platform-known obscured content.
@@ -3174,7 +3191,7 @@ impl Window {
     /// Intersects the visual viewport with the full layout area inset by system
     /// safe areas and keyboard occlusion. Unknown overlays cannot be excluded.
     pub fn fully_visible_bounds(&self) -> Bounds<Pixels> {
-        let insets = self.platform_window.insets().effective();
+        let insets = self.insets().effective();
         let viewport = self.viewport_size();
         let left = insets.left.max(Pixels::ZERO).min(viewport.width);
         let top = insets.top.max(Pixels::ZERO).min(viewport.height);
@@ -3227,7 +3244,8 @@ impl Window {
 
     /// Opens the native title bar context menu, useful when implementing client side decorations (Wayland and X11)
     pub fn show_window_menu(&self, position: Point<Pixels>) {
-        self.platform_window.show_window_menu(position)
+        self.platform_window
+            .show_window_menu(position * self.zoom_factor)
     }
 
     /// Handle window movement for Linux and macOS.
@@ -3241,12 +3259,14 @@ impl Window {
     /// When using client side decorations, set this to the width of the invisible decorations (Wayland and X11)
     pub fn set_client_inset(&mut self, inset: Pixels) {
         self.client_inset = Some(inset);
-        self.platform_window.set_client_inset(inset);
+        self.platform_window
+            .set_client_inset(inset * self.zoom_factor);
     }
 
     /// Sets the client-drawn corner radii so platform effects can match the window's shape.
     pub fn set_client_corner_radii(&mut self, radii: Corners<Pixels>) {
-        self.platform_window.set_client_corner_radii(radii);
+        self.platform_window
+            .set_client_corner_radii(radii.map(|radius| *radius * self.zoom_factor));
     }
 
     /// Returns the client_inset value by [`Self::set_client_inset`].
@@ -3321,11 +3341,31 @@ impl Window {
         self.platform_window.show_character_palette();
     }
 
-    /// The scale factor of the display associated with the window. For example, it could
-    /// return 2.0 for a "retina" display, indicating that each logical pixel should actually
-    /// be rendered as two pixels on screen.
+    /// The scale factor of the display associated with the window, times the window's
+    /// [zoom factor](Self::zoom_factor). For example, it could return 2.0 for a "retina"
+    /// display, indicating that each logical pixel should actually be rendered as two
+    /// pixels on screen.
     pub fn scale_factor(&self) -> f32 {
         self.scale_factor
+    }
+
+    /// Returns the factor the window's content is zoomed by, 1.0 unless
+    /// [`Self::set_zoom_factor`] changed it.
+    pub fn zoom_factor(&self) -> f32 {
+        self.zoom_factor
+    }
+
+    /// Zooms the window's content by `zoom_factor`, as a browser's page zoom does.
+    ///
+    /// The scale factor grows by the zoom factor and the viewport shrinks by it, and
+    /// platform input and geometry are converted to match. The window's bounds stay
+    /// in screen coordinates. Non-positive and non-finite factors are ignored.
+    pub fn set_zoom_factor(&mut self, zoom_factor: f32, cx: &mut App) {
+        if !zoom_factor.is_finite() || zoom_factor <= 0.0 || zoom_factor == self.zoom_factor {
+            return;
+        }
+        self.zoom_factor = zoom_factor;
+        self.bounds_changed(cx);
     }
 
     /// Overrides the display scale factor for tests.
@@ -6946,6 +6986,7 @@ impl Window {
         self.on_next_frame(|window, cx| {
             if let Some(mut input_handler) = window.platform_window.take_input_handler() {
                 if let Some(bounds) = input_handler.selected_bounds(window, cx) {
+                    let bounds = bounds.map(|value| value * window.zoom_factor);
                     window.platform_window.update_ime_position(bounds);
                 }
                 window.platform_window.set_input_handler(input_handler);
@@ -8178,10 +8219,10 @@ mod tests {
         ExternalPaths, FileDragPaths, FileDropEvent, FocusHandle, InputEvent as _,
         InteractiveElement as _, IntoElement, KeyDownEvent, Keystroke, LongPressEvent, MouseButton,
         MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, PlatformInput, Point,
-        Render, RequestFrameOptions, ScaledPixels, StatefulInteractiveElement as _, Styled,
-        TestAppContext, ThermalState, TouchDragEvent, TouchEvent, TouchId, TouchPhase, Underline,
-        UnderlineStyle, Window, WindowAppearance, WindowOptions, canvas, div, hsla, point, px,
-        size,
+        Render, RequestFrameOptions, ScaledPixels, ScrollDelta, ScrollEvent,
+        StatefulInteractiveElement as _, Styled, TestAppContext, ThermalState, TouchDragEvent,
+        TouchEvent, TouchId, TouchPhase, Underline, UnderlineStyle, Window, WindowAppearance,
+        WindowOptions, canvas, div, hsla, point, px, size,
     };
 
     #[gpui::test]
@@ -8916,6 +8957,201 @@ mod tests {
                 window_state(&mut cx),
                 (scale_factor, expected_bounds, resized_size)
             );
+        }
+    }
+
+    #[test]
+    fn test_zoom_factor_scales_rendering_and_divides_the_viewport() {
+        let mut cx = TestAppContext::single();
+        let window = cx.add_window(|_, _| EmptyView);
+        let handle: AnyWindowHandle = window.into();
+        let window_state = |cx: &mut TestAppContext| {
+            cx.update_window(handle, |_, window, _| {
+                (
+                    window.zoom_factor(),
+                    window.scale_factor(),
+                    window.bounds(),
+                    window.viewport_size(),
+                )
+            })
+            .unwrap()
+        };
+        let set_zoom_factor = |cx: &mut TestAppContext, zoom_factor| {
+            cx.update_window(handle, |_, window, cx| {
+                window.set_zoom_factor(zoom_factor, cx)
+            })
+            .unwrap()
+        };
+
+        let (_, _, mut bounds, _) = window_state(&mut cx);
+        set_zoom_factor(&mut cx, 1.5);
+        assert_eq!(window_state(&mut cx), (1.5, 3.0, bounds, bounds.size / 1.5));
+
+        cx.simulate_window_resize(handle, size(px(900.), px(600.)));
+        bounds.size = size(px(900.), px(600.));
+        let zoomed_viewport = size(px(600.), px(400.));
+        assert_eq!(window_state(&mut cx), (1.5, 3.0, bounds, zoomed_viewport));
+
+        cx.simulate_window_scale_factor_change(handle, 1.0);
+        assert_eq!(window_state(&mut cx), (1.5, 1.5, bounds, zoomed_viewport));
+
+        for invalid in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            set_zoom_factor(&mut cx, invalid);
+            assert_eq!(window_state(&mut cx), (1.5, 1.5, bounds, zoomed_viewport));
+        }
+
+        set_zoom_factor(&mut cx, 1.0);
+        assert_eq!(window_state(&mut cx), (1.0, 1.0, bounds, bounds.size));
+    }
+
+    #[gpui::test]
+    fn test_zoom_factor_scales_painting_and_converts_platform_input(cx: &mut TestAppContext) {
+        let mouse_downs = Rc::new(RefCell::new(Vec::new()));
+        let scroll_deltas = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let mouse_downs = mouse_downs.clone();
+            let scroll_deltas = scroll_deltas.clone();
+            |_, _| ZoomTarget {
+                mouse_downs,
+                scroll_deltas,
+            }
+        });
+        let painted_bounds = |cx: &mut crate::VisualTestContext| {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                window
+                    .painted_quads()
+                    .into_iter()
+                    .map(|quad| quad.bounds)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let device_bounds = |x, y, width, height| {
+            Bounds::new(
+                point(ScaledPixels(x), ScaledPixels(y)),
+                size(ScaledPixels(width), ScaledPixels(height)),
+            )
+        };
+
+        assert_eq!(painted_bounds(cx), [device_bounds(200., 100., 200., 80.)]);
+        cx.update(|window, cx| window.set_zoom_factor(1.5, cx));
+        assert_eq!(painted_bounds(cx), [device_bounds(300., 150., 300., 120.)]);
+
+        cx.update(|window, cx| window.set_zoom_factor(2.0, cx));
+        painted_bounds(cx);
+        for position in [point(px(160.), px(70.)), point(px(300.), px(140.))] {
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+        }
+        assert_eq!(*mouse_downs.borrow(), [point(px(150.), px(70.))]);
+        assert_eq!(
+            cx.update(|window, _| window.mouse_position()),
+            point(px(150.), px(70.))
+        );
+
+        for delta in [
+            ScrollDelta::Pixels(point(px(0.), px(30.))),
+            ScrollDelta::Lines(point(0., 1.)),
+        ] {
+            cx.simulate_event(ScrollEvent {
+                position: point(px(300.), px(140.)),
+                delta,
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            *scroll_deltas.borrow(),
+            [point(px(0.), px(15.)), point(px(0.), px(20.))]
+        );
+    }
+
+    #[gpui::test]
+    fn test_zoom_factor_divides_visual_viewport_and_insets(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform_window = cx.test_window(window.into());
+        platform_window.simulate_resize(size(px(400.), px(800.)));
+        platform_window.simulate_visual_viewport_change(Bounds::new(
+            point(px(10.), px(40.)),
+            size(px(380.), px(460.)),
+        ));
+        platform_window.simulate_insets_change(crate::WindowInsets {
+            safe_area: crate::Edges {
+                top: px(60.),
+                ..Default::default()
+            },
+            ime: crate::Edges {
+                bottom: px(300.),
+                ..Default::default()
+            },
+            corner_radii: crate::Corners::all(px(40.)),
+        });
+        window
+            .update(cx, |_, window, cx| {
+                window.set_zoom_factor(2.0, cx);
+                assert_eq!(window.viewport_size(), size(px(200.), px(400.)));
+                assert_eq!(
+                    window.visual_viewport_bounds(),
+                    Bounds::new(point(px(5.), px(20.)), size(px(190.), px(230.)))
+                );
+                assert_eq!(
+                    window.insets(),
+                    crate::WindowInsets {
+                        safe_area: crate::Edges {
+                            top: px(30.),
+                            ..Default::default()
+                        },
+                        ime: crate::Edges {
+                            bottom: px(150.),
+                            ..Default::default()
+                        },
+                        corner_radii: crate::Corners::all(px(20.)),
+                    }
+                );
+                assert_eq!(
+                    window.fully_visible_bounds(),
+                    Bounds::new(point(px(5.), px(30.)), size(px(190.), px(220.)))
+                );
+            })
+            .unwrap();
+    }
+
+    struct ZoomTarget {
+        mouse_downs: Rc<RefCell<Vec<Point<Pixels>>>>,
+        scroll_deltas: Rc<RefCell<Vec<Point<Pixels>>>>,
+    }
+
+    impl Render for ZoomTarget {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let mouse_downs = self.mouse_downs.clone();
+            let scroll_deltas = self.scroll_deltas.clone();
+            div().size_full().child(
+                div()
+                    .id("target")
+                    .absolute()
+                    .left(px(100.))
+                    .top(px(50.))
+                    .w(px(100.))
+                    .h(px(40.))
+                    .bg(hsla(0., 0., 0., 1.))
+                    .on_mouse_down(MouseButton::Left, move |event, _, _| {
+                        mouse_downs.borrow_mut().push(event.position)
+                    })
+                    .on_scroll(move |event, _, _| {
+                        scroll_deltas
+                            .borrow_mut()
+                            .push(event.delta.pixel_delta(px(20.)))
+                    }),
+            )
         }
     }
 
