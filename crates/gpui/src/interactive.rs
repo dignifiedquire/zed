@@ -893,6 +893,85 @@ impl PlatformInput {
             _ => None,
         }
     }
+
+    /// Converts the positions and pixel scroll deltas of an event from the
+    /// platform's window coordinates into those of a window zoomed by
+    /// `zoom_factor`.
+    pub(crate) fn unzoom(self, zoom_factor: f32) -> Self {
+        if zoom_factor == 1.0 {
+            return self;
+        }
+        let unzoom = |position: Point<Pixels>| position / zoom_factor;
+        match self {
+            PlatformInput::KeyDown(_)
+            | PlatformInput::KeyUp(_)
+            | PlatformInput::ModifiersChanged(_) => self,
+            PlatformInput::MouseDown(mut event) => {
+                event.position = unzoom(event.position);
+                PlatformInput::MouseDown(event)
+            }
+            PlatformInput::MouseUp(mut event) => {
+                event.position = unzoom(event.position);
+                PlatformInput::MouseUp(event)
+            }
+            PlatformInput::MouseMove(mut event) => {
+                event.position = unzoom(event.position);
+                PlatformInput::MouseMove(event)
+            }
+            PlatformInput::MousePressure(mut event) => {
+                event.position = unzoom(event.position);
+                PlatformInput::MousePressure(event)
+            }
+            PlatformInput::MouseExited(mut event) => {
+                event.position = unzoom(event.position);
+                PlatformInput::MouseExited(event)
+            }
+            PlatformInput::Scroll(mut event) => {
+                event.position = unzoom(event.position);
+                if let ScrollDelta::Pixels(delta) = event.delta {
+                    event.delta = ScrollDelta::Pixels(unzoom(delta));
+                }
+                PlatformInput::Scroll(event)
+            }
+            PlatformInput::Pinch(mut event) => {
+                event.position = unzoom(event.position);
+                PlatformInput::Pinch(event)
+            }
+            PlatformInput::LongPress(mut event) => {
+                event.start_position = unzoom(event.start_position);
+                event.position = unzoom(event.position);
+                PlatformInput::LongPress(event)
+            }
+            PlatformInput::TouchDrag(mut event) => {
+                event.start_position = unzoom(event.start_position);
+                event.position = unzoom(event.position);
+                PlatformInput::TouchDrag(event)
+            }
+            PlatformInput::BackGesture(mut event) => {
+                event.start_position = unzoom(event.start_position);
+                PlatformInput::BackGesture(event)
+            }
+            PlatformInput::FileDrop(event) => PlatformInput::FileDrop(match event {
+                FileDropEvent::Entered { position, paths } => FileDropEvent::Entered {
+                    position: unzoom(position),
+                    paths,
+                },
+                FileDropEvent::Pending { position } => FileDropEvent::Pending {
+                    position: unzoom(position),
+                },
+                FileDropEvent::Submit { position } => FileDropEvent::Submit {
+                    position: unzoom(position),
+                },
+                FileDropEvent::Exited => FileDropEvent::Exited,
+                FileDropEvent::Ended => FileDropEvent::Ended,
+            }),
+            PlatformInput::Touch(mut event) => {
+                event.position = unzoom(event.position);
+                event.predicted_position = event.predicted_position.map(unzoom);
+                PlatformInput::Touch(event)
+            }
+        }
+    }
 }
 
 #[cfg(test)]

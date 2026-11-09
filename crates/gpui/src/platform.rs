@@ -2239,7 +2239,10 @@ impl PlatformInputHandler {
 
     pub fn bounds_for_range(&mut self, range_utf16: Range<usize>) -> Option<Bounds<Pixels>> {
         self.cx
-            .update(|window, cx| self.handler.bounds_for_range(range_utf16, window, cx))
+            .update(|window, cx| {
+                let bounds = self.handler.bounds_for_range(range_utf16, window, cx)?;
+                Some(bounds.map(|value| value * window.zoom_factor()))
+            })
             .ok()
             .flatten()
     }
@@ -2247,8 +2250,14 @@ impl PlatformInputHandler {
     pub fn selection_bounds_for_range(&mut self, range_utf16: Range<usize>) -> Vec<Bounds<Pixels>> {
         self.cx
             .update(|window, cx| {
-                self.handler
-                    .selection_bounds_for_range(range_utf16, window, cx)
+                let zoom_factor = window.zoom_factor();
+                let mut bounds = self
+                    .handler
+                    .selection_bounds_for_range(range_utf16, window, cx);
+                for bounds in &mut bounds {
+                    *bounds = bounds.map(|value| value * zoom_factor);
+                }
+                bounds
             })
             .unwrap_or_default()
     }
@@ -2322,7 +2331,10 @@ impl PlatformInputHandler {
     #[allow(unused)]
     pub fn character_index_for_point(&mut self, point: Point<Pixels>) -> Option<usize> {
         self.cx
-            .update(|window, cx| self.handler.character_index_for_point(point, window, cx))
+            .update(|window, cx| {
+                let point = point / window.zoom_factor();
+                self.handler.character_index_for_point(point, window, cx)
+            })
             .ok()
             .flatten()
     }
@@ -2340,7 +2352,10 @@ impl PlatformInputHandler {
     /// See [`InputHandler::element_bounds`].
     pub fn element_bounds(&mut self) -> Option<Bounds<Pixels>> {
         self.cx
-            .update(|window, cx| self.handler.element_bounds(window, cx))
+            .update(|window, cx| {
+                let bounds = self.handler.element_bounds(window, cx)?;
+                Some(bounds.map(|value| value * window.zoom_factor()))
+            })
             .ok()
             .flatten()
     }
