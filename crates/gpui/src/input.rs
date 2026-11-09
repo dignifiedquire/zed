@@ -502,6 +502,36 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn input_method_geometry_is_in_platform_coordinates_under_zoom(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, cx| ConfigurationTestView {
+            focus_handle: cx.focus_handle(),
+            configuration: TextInputConfiguration::default(),
+            accepts_text_input: true,
+        });
+        let view = window.root(cx).unwrap();
+        let mut test_window = cx.test_window(window.into());
+        let window = AnyWindowHandle::from(window);
+        let focus = view.read_with(cx, |view, _| view.focus_handle.clone());
+        cx.update_window(window, |_, window, cx| {
+            window.set_zoom_factor(2.0, cx);
+            window.focus(&focus, cx);
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+
+        use crate::PlatformWindow as _;
+        let content = Bounds::new(crate::Point::default(), test_window.content_size());
+        let mut handler = test_window.take_input_handler().unwrap();
+        assert_eq!(handler.bounds_for_range(0..0), Some(content));
+        assert_eq!(handler.selection_bounds_for_range(0..1), [content]);
+        assert_eq!(handler.element_bounds(), Some(content));
+        assert_eq!(
+            handler.character_index_for_point(crate::point(crate::px(300.), crate::px(10.))),
+            Some(150)
+        );
+    }
+
     struct ConfigurationTestView {
         focus_handle: FocusHandle,
         configuration: TextInputConfiguration,
@@ -584,20 +614,30 @@ mod tests {
         fn bounds_for_range(
             &mut self,
             _range_utf16: std::ops::Range<usize>,
-            _element_bounds: Bounds<Pixels>,
+            element_bounds: Bounds<Pixels>,
             _window: &mut Window,
             _cx: &mut Context<Self>,
         ) -> Option<Bounds<Pixels>> {
-            None
+            Some(element_bounds)
+        }
+
+        fn selection_bounds_for_range(
+            &mut self,
+            _range_utf16: std::ops::Range<usize>,
+            element_bounds: Bounds<Pixels>,
+            _window: &mut Window,
+            _cx: &mut Context<Self>,
+        ) -> Vec<Bounds<Pixels>> {
+            vec![element_bounds]
         }
 
         fn character_index_for_point(
             &mut self,
-            _point: crate::Point<Pixels>,
+            point: crate::Point<Pixels>,
             _window: &mut Window,
             _cx: &mut Context<Self>,
         ) -> Option<usize> {
-            None
+            Some(f32::from(point.x) as usize)
         }
 
         fn text_input_configuration(
