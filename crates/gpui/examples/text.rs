@@ -374,6 +374,7 @@ fn run_example() {
         cx.set_menus(vec![Menu {
             name: "GPUI Typography".into(),
             disabled: false,
+            is_help: false,
             items: vec![],
         }]);
 

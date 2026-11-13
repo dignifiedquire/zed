@@ -175,6 +175,7 @@ fn run_example() {
             name: "Image".into(),
             items: vec![MenuItem::action("Quit", Quit)],
             disabled: false,
+            is_help: false,
         }]);
 
         let window_options = WindowOptions {

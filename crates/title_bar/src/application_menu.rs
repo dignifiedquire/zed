@@ -394,6 +394,7 @@ mod tests {
         OwnedMenu {
             name: name.into(),
             disabled: false,
+            is_help: false,
             items: vec![OwnedMenuItem::Action {
                 name: item_name.to_string(),
                 action: OpenApplicationMenu(String::new()).boxed_clone(),
@@ -437,6 +438,7 @@ mod tests {
             name: "View".into(),
             items,
             disabled: false,
+            is_help: false,
         }
     }
 

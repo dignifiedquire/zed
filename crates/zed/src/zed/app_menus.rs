@@ -32,6 +32,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::submenu(Menu {
             name: "Editor Layout".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::action("Split Up", workspace::SplitUp::default()),
                 MenuItem::action("Split Down", workspace::SplitDown::default()),
@@ -70,6 +71,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Zed".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::action("About Zed", zed_actions::About),
                 MenuItem::action("Check for Updates", auto_update::Check),
@@ -115,6 +117,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "File".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::action("New", workspace::NewFile),
                 MenuItem::action("New Window", workspace::NewWindow),
@@ -152,6 +155,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Edit".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::os_action("Undo", editor::actions::Undo, OsAction::Undo),
                 MenuItem::os_action("Redo", editor::actions::Redo, OsAction::Redo),
@@ -173,6 +177,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Selection".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::os_action(
                     "Select All",
@@ -221,11 +226,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "View".into(),
             disabled: false,
+            is_help: false,
             items: view_items,
         },
         Menu {
             name: "Go".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::action("Back", workspace::GoBack),
                 MenuItem::action("Forward", workspace::GoForward),
@@ -269,6 +276,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Run".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::action(
                     "Spawn Task",
@@ -294,6 +302,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Window".into(),
             disabled: false,
+            is_help: false,
             items: vec![
                 MenuItem::action("Minimize", super::Minimize),
                 MenuItem::action("Zoom", super::Zoom),
@@ -303,6 +312,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         Menu {
             name: "Help".into(),
             disabled: false,
+            is_help: true,
             items: vec![
                 MenuItem::action(
                     "View Release Notes Locally",
