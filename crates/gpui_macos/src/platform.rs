@@ -297,6 +297,11 @@ impl MacPlatform {
                     let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
                     let _: () = msg_send![app, setWindowsMenu: &*menu];
                 }
+
+                if menu_config.is_help {
+                    let app: *mut AnyObject = msg_send![APP_CLASS, sharedApplication];
+                    let _: () = msg_send![app, setHelpMenu: &*menu];
+                }
             }
 
             application_menu
@@ -440,6 +445,7 @@ impl MacPlatform {
                     name,
                     items,
                     disabled,
+                    ..
                 }) => {
                     let item = NSMenuItem::new(self.1);
                     let submenu = NSMenu::new(self.1);

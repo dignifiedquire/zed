@@ -10,6 +10,10 @@ pub struct Menu {
 
     /// Whether this menu is disabled
     pub disabled: bool,
+
+    /// Whether this menu is the application's help menu, to which macOS adds
+    /// its search field
+    pub is_help: bool,
 }
 
 impl Menu {
@@ -19,6 +23,7 @@ impl Menu {
             name: name.into(),
             items: vec![],
             disabled: false,
+            is_help: false,
         }
     }
 
@@ -34,12 +39,19 @@ impl Menu {
         self
     }
 
+    /// Set whether this menu is the application's help menu
+    pub fn help(mut self, is_help: bool) -> Self {
+        self.is_help = is_help;
+        self
+    }
+
     /// Create an OwnedMenu from this Menu
     pub fn owned(self) -> OwnedMenu {
         OwnedMenu {
             name: self.name.to_string().into(),
             items: self.items.into_iter().map(|item| item.owned()).collect(),
             disabled: self.disabled,
+            is_help: self.is_help,
         }
     }
 }
@@ -244,6 +256,9 @@ pub struct OwnedMenu {
 
     /// Whether this menu is disabled
     pub disabled: bool,
+
+    /// Whether this menu is the application's help menu
+    pub is_help: bool,
 }
 
 /// The different kinds of items that can be in a menu
@@ -374,6 +389,8 @@ mod tests {
         assert_eq!(menu.name.as_ref(), "App");
         assert_eq!(menu.items.len(), 2);
         assert!(menu.disabled);
+        assert!(!menu.is_help);
+        assert!(Menu::new("Help").help(true).owned().is_help);
     }
 
     #[test]
@@ -412,6 +429,7 @@ mod tests {
             name: "Submenu".into(),
             items: vec![],
             disabled: true,
+            is_help: false,
         });
         assert_eq!(
             match &submenu {
