@@ -1,6 +1,6 @@
 use crate::{
     App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
+    ObjectFit, Pixels, Style, StyleRefinement, Styled, SurfaceOrientation, Window,
 };
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use objc2_core_foundation::CFRetained;
@@ -27,6 +27,7 @@ impl From<CFRetained<CVPixelBuffer>> for SurfaceSource {
 pub struct Surface {
     source: SurfaceSource,
     object_fit: ObjectFit,
+    orientation: SurfaceOrientation,
     style: StyleRefinement,
 }
 
@@ -36,6 +37,7 @@ pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
         object_fit: ObjectFit::Contain,
+        orientation: SurfaceOrientation::default(),
         style: Default::default(),
     }
 }
@@ -44,6 +46,13 @@ impl Surface {
     /// Set the object fit for the image.
     pub fn object_fit(mut self, object_fit: ObjectFit) -> Self {
         self.object_fit = object_fit;
+        self
+    }
+
+    /// Set how the image buffer turns for display, such as a video track's display matrix
+    /// asks.
+    pub fn orientation(mut self, orientation: SurfaceOrientation) -> Self {
+        self.orientation = orientation;
         self
     }
 }
@@ -105,15 +114,21 @@ impl Element for Surface {
         match &self.source {
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             SurfaceSource::Surface(surface) => {
-                let size = crate::size(
+                let size = self.orientation.displayed_size(crate::size(
                     CVPixelBufferGetWidth(surface).into(),
                     CVPixelBufferGetHeight(surface).into(),
-                );
+                ));
                 let image_bounds = self.object_fit.get_bounds(bounds, size);
                 let mut style = Style::default();
                 style.refine(&self.style);
                 let corner_radii = style.corner_radii.to_pixels(window.rem_size());
-                window.paint_surface(bounds, image_bounds, corner_radii, surface.clone());
+                window.paint_surface(
+                    bounds,
+                    image_bounds,
+                    corner_radii,
+                    self.orientation,
+                    surface.clone(),
+                );
             }
             #[allow(unreachable_patterns)]
             _ => {}
@@ -196,5 +211,36 @@ mod tests {
         };
         assert_eq!(texture_bounds, middle);
         assert_eq!(radius, px(50.).scale(scale_factor));
+    }
+
+    #[crate::test]
+    fn quarter_turned_buffer_fits_by_its_displayed_shape(cx: &mut TestAppContext) {
+        let buffer = setup_buffer(200, 100);
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(100.), px(100.)), |_, _| {
+            div()
+                .size(px(100.))
+                .child(
+                    surface(buffer.clone())
+                        .size_full()
+                        .orientation(SurfaceOrientation {
+                            rotation: crate::SurfaceRotation::Clockwise90,
+                            is_mirrored: false,
+                        }),
+                )
+                .into_any_element()
+        });
+        let (bounds, scale_factor) = window.update(|window, _| {
+            let bounds = window
+                .rendered_frame
+                .scene
+                .surfaces
+                .last()
+                .map(|surface| surface.bounds);
+            (bounds, window.scale_factor())
+        });
+        let bounds = bounds.unwrap();
+        assert_eq!(bounds.size.width, px(50.).scale(scale_factor));
+        assert_eq!(bounds.size.height, px(100.).scale(scale_factor));
     }
 }

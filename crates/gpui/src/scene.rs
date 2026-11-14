@@ -770,10 +770,51 @@ pub struct PaintSurface {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
-    /// The part of the image buffer the bounds show, in fractions of its size.
+    /// The part of the image the bounds show, in fractions of its size as displayed.
     pub texture_bounds: Bounds<f32>,
+    pub orientation: SurfaceOrientation,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+}
+
+/// How a surface turns its image buffer for display.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct SurfaceOrientation {
+    /// The clockwise turn applied to the buffer.
+    pub rotation: SurfaceRotation,
+    /// Whether the buffer flips left to right before it turns.
+    pub is_mirrored: bool,
+}
+
+impl SurfaceOrientation {
+    /// Returns the size a buffer of `size` displays at.
+    pub fn displayed_size<T>(self, size: Size<T>) -> Size<T>
+    where
+        T: Clone + Debug + Default + PartialEq,
+    {
+        match self.rotation {
+            SurfaceRotation::None | SurfaceRotation::Clockwise180 => size,
+            SurfaceRotation::Clockwise90 | SurfaceRotation::Clockwise270 => Size {
+                width: size.height,
+                height: size.width,
+            },
+        }
+    }
+}
+
+/// A clockwise turn of a surface's buffer, in quarter turns.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u32)]
+pub enum SurfaceRotation {
+    /// The buffer shows as it is.
+    #[default]
+    None = 0,
+    /// A quarter turn, which shows a portrait phone video's buffer upright.
+    Clockwise90 = 1,
+    /// A half turn.
+    Clockwise180 = 2,
+    /// Three quarter turns.
+    Clockwise270 = 3,
 }
 
 impl From<PaintSurface> for Primitive {

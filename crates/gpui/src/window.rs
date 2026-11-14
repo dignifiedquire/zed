@@ -5440,8 +5440,8 @@ impl Window {
 
     /// Paint a surface into the scene for the next frame at the current z-index.
     ///
-    /// The image buffer fills `image_bounds`, and only its part inside `bounds` shows, with
-    /// those bounds' corners rounded to `corner_radii`.
+    /// The image buffer, turned by `orientation`, fills `image_bounds`, and only its part
+    /// inside `bounds` shows, with those bounds' corners rounded to `corner_radii`.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -5450,6 +5450,7 @@ impl Window {
         bounds: Bounds<Pixels>,
         image_bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
+        orientation: crate::SurfaceOrientation,
         image_buffer: CFRetained<CVPixelBuffer>,
     ) {
         use crate::PaintSurface;
@@ -5485,6 +5486,7 @@ impl Window {
             content_mask,
             corner_radii,
             texture_bounds,
+            orientation,
             image_buffer,
         });
     }
