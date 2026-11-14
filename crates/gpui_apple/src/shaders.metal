@@ -874,10 +874,23 @@ vertex SurfaceVertexOutput surface_vertex(
       to_device_position(unit_vertex, surface.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds,
                                                  surface.content_mask.bounds);
-  float2 texture_position =
+  float2 displayed_position =
       float2(surface.texture_bounds.origin.x, surface.texture_bounds.origin.y) +
       unit_vertex * float2(surface.texture_bounds.size.width,
                            surface.texture_bounds.size.height);
+  // Undo the clockwise turn, then the left-to-right flip, to find the buffer's
+  // point that shows at this displayed point.
+  float2 texture_position = displayed_position;
+  if (surface.rotation == 1) {
+    texture_position = float2(displayed_position.y, 1. - displayed_position.x);
+  } else if (surface.rotation == 2) {
+    texture_position = 1. - displayed_position;
+  } else if (surface.rotation == 3) {
+    texture_position = float2(1. - displayed_position.y, displayed_position.x);
+  }
+  if (surface.is_mirrored != 0) {
+    texture_position.x = 1. - texture_position.x;
+  }
   return SurfaceVertexOutput{
       device_position,
       texture_position,

@@ -1701,6 +1701,8 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
             content_mask: surface.content_mask,
             corner_radii: surface.corner_radii,
             texture_bounds: surface.texture_bounds,
+            rotation: surface.orientation.rotation as u32,
+            is_mirrored: u32::from(surface.orientation.is_mirrored),
         }))?,
     })
 }
@@ -2034,6 +2036,9 @@ pub struct SurfaceBounds {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub texture_bounds: Bounds<f32>,
+    /// Clockwise quarter turns.
+    pub rotation: u32,
+    pub is_mirrored: u32,
 }
 
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -2072,6 +2077,7 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{SurfaceOrientation, SurfaceRotation};
     use objc2_core_foundation::{CFDictionary, CFType};
     use objc2_core_video::{
         CVAttachmentMode, CVPixelBufferCreate, CVPixelBufferGetBaseAddressOfPlane,
@@ -2248,6 +2254,7 @@ mod tests {
             content_mask: ContentMask { bounds },
             corner_radii: Corners::default(),
             texture_bounds: FULL_TEXTURE,
+            orientation: SurfaceOrientation::default(),
             image_buffer: image_buffer.clone(),
         });
         drop(image_buffer);
@@ -2374,17 +2381,23 @@ mod tests {
 
     /// Returns the colour `image_buffer` draws in, as a 16 by 16 surface.
     fn render_surface(image_buffer: CFRetained<CVPixelBuffer>) -> [u8; 4] {
-        render_shaped_surface(image_buffer, Corners::default(), FULL_TEXTURE)
-            .get_pixel(8, 8)
-            .0
+        render_shaped_surface(
+            image_buffer,
+            Corners::default(),
+            FULL_TEXTURE,
+            SurfaceOrientation::default(),
+        )
+        .get_pixel(8, 8)
+        .0
     }
 
-    /// Returns the 16 by 16 image of `image_buffer` drawn with `corner_radii`, showing the
-    /// part `texture_bounds` covers.
+    /// Returns the 16 by 16 image of `image_buffer` drawn with `corner_radii` and turned by
+    /// `orientation`, showing the part `texture_bounds` covers.
     fn render_shaped_surface(
         image_buffer: CFRetained<CVPixelBuffer>,
         corner_radii: Corners<ScaledPixels>,
         texture_bounds: Bounds<f32>,
+        orientation: SurfaceOrientation,
     ) -> RgbaImage {
         let bounds = Bounds {
             origin: Point::default(),
@@ -2397,6 +2410,7 @@ mod tests {
             content_mask: ContentMask { bounds },
             corner_radii,
             texture_bounds,
+            orientation,
             image_buffer,
         });
         scene.finish();
@@ -2472,7 +2486,12 @@ mod tests {
             bottom_right: radius,
             bottom_left: radius,
         };
-        let image = render_shaped_surface(white, corner_radii, FULL_TEXTURE);
+        let image = render_shaped_surface(
+            white,
+            corner_radii,
+            FULL_TEXTURE,
+            SurfaceOrientation::default(),
+        );
         for (x, y) in [(0, 0), (15, 0), (15, 15), (0, 15)] {
             assert_near(image.get_pixel(x, y).0, [0, 0, 0, 255]);
         }
@@ -2480,8 +2499,8 @@ mod tests {
         assert_near(image.get_pixel(8, 2).0, [255, 255, 255, 255]);
     }
 
-    #[test]
-    fn surface_shows_only_its_texture_bounds() {
+    /// Returns a white buffer whose left half is black.
+    fn setup_half_black_surface() -> CFRetained<CVPixelBuffer> {
         let image_buffer = setup_surface(
             kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
             255,
@@ -2497,6 +2516,12 @@ mod tests {
             }
             CVPixelBufferUnlockBaseAddress(&image_buffer, CVPixelBufferLockFlags::empty());
         }
+        image_buffer
+    }
+
+    #[test]
+    fn surface_shows_only_its_texture_bounds() {
+        let image_buffer = setup_half_black_surface();
         let right_half = Bounds {
             origin: Point { x: 0.5, y: 0.0 },
             size: Size {
@@ -2504,8 +2529,45 @@ mod tests {
                 height: 1.0,
             },
         };
-        let image = render_shaped_surface(image_buffer, Corners::default(), right_half);
+        let image = render_shaped_surface(
+            image_buffer,
+            Corners::default(),
+            right_half,
+            SurfaceOrientation::default(),
+        );
         assert_near(image.get_pixel(1, 8).0, [255, 255, 255, 255]);
         assert_near(image.get_pixel(14, 8).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn quarter_turn_shows_the_buffer_s_left_half_at_the_top() {
+        let turned = SurfaceOrientation {
+            rotation: SurfaceRotation::Clockwise90,
+            is_mirrored: false,
+        };
+        let image = render_shaped_surface(
+            setup_half_black_surface(),
+            Corners::default(),
+            FULL_TEXTURE,
+            turned,
+        );
+        assert_near(image.get_pixel(8, 2).0, [0, 0, 0, 255]);
+        assert_near(image.get_pixel(8, 13).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn mirrored_surface_swaps_its_left_and_right() {
+        let mirrored = SurfaceOrientation {
+            rotation: SurfaceRotation::None,
+            is_mirrored: true,
+        };
+        let image = render_shaped_surface(
+            setup_half_black_surface(),
+            Corners::default(),
+            FULL_TEXTURE,
+            mirrored,
+        );
+        assert_near(image.get_pixel(2, 8).0, [255, 255, 255, 255]);
+        assert_near(image.get_pixel(13, 8).0, [0, 0, 0, 255]);
     }
 }
