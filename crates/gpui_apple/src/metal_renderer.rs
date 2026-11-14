@@ -2,8 +2,8 @@ use crate::metal_atlas::MetalAtlas;
 use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
-    AtlasTextureId, Bounds, ContentMask, DevicePixels, PaintSurface, PaintedPath, PrimitiveBatch,
-    ScaledPixels, Scene, Size, quad_depth, quad_depth_scale, size,
+    AtlasTextureId, Bounds, ContentMask, Corners, DevicePixels, PaintSurface, PaintedPath,
+    PrimitiveBatch, ScaledPixels, Scene, Size, point, quad_depth, quad_depth_scale, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -1260,6 +1260,11 @@ impl MetalRenderer {
                 instance_bindings.surfaces.offset,
                 SurfaceInputIndex::Surfaces as usize,
             );
+            command_encoder.setFragmentBuffer_offset_atIndex(
+                Some(&instance_bindings.surfaces.buffer),
+                instance_bindings.surfaces.offset,
+                SurfaceInputIndex::Surfaces as usize,
+            );
         }
 
         for (index, surface) in surfaces.iter().enumerate() {
@@ -1506,11 +1511,15 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
         surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
             bounds: surface.bounds,
             content_mask: surface.content_mask,
+            corner_radii: surface.corner_radii,
+            texture_bounds: surface.texture_bounds,
         }))?,
         native_views: writer.write_iter(scene.native_views.iter().map(|native_view| {
             SurfaceBounds {
                 bounds: native_view.bounds,
                 content_mask: native_view.content_mask,
+                corner_radii: Corners::default(),
+                texture_bounds: Bounds::new(point(0., 0.), size(1., 1.)),
             }
         }))?,
     })
@@ -1832,11 +1841,13 @@ enum PathTileInputIndex {
     Paints = 4,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+    pub texture_bounds: Bounds<f32>,
 }
 
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -1883,6 +1894,14 @@ mod tests {
         CVPixelBufferUnlockBaseAddress, kCVPixelBufferIOSurfacePropertiesKey,
     };
     use objc2_metal::MTLCommandBufferStatus;
+
+    const FULL_TEXTURE: Bounds<f32> = Bounds {
+        origin: Point { x: 0.0, y: 0.0 },
+        size: Size {
+            width: 1.0,
+            height: 1.0,
+        },
+    };
 
     #[test]
     fn render_to_image_rejects_zero_sized_layer() -> Result<()> {
@@ -1988,6 +2007,8 @@ mod tests {
             order: 0,
             bounds,
             content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+            texture_bounds: FULL_TEXTURE,
             image_buffer: image_buffer.clone(),
         });
         drop(image_buffer);
@@ -2114,6 +2135,18 @@ mod tests {
 
     /// Returns the colour `image_buffer` draws in, as a 16 by 16 surface.
     fn render_surface(image_buffer: CFRetained<CVPixelBuffer>) -> [u8; 4] {
+        render_shaped_surface(image_buffer, Corners::default(), FULL_TEXTURE)
+            .get_pixel(8, 8)
+            .0
+    }
+
+    /// Returns the 16 by 16 image of `image_buffer` drawn with `corner_radii`, showing the
+    /// part `texture_bounds` covers.
+    fn render_shaped_surface(
+        image_buffer: CFRetained<CVPixelBuffer>,
+        corner_radii: Corners<ScaledPixels>,
+        texture_bounds: Bounds<f32>,
+    ) -> RgbaImage {
         let bounds = Bounds {
             origin: Point::default(),
             size: size(ScaledPixels(16.0), ScaledPixels(16.0)),
@@ -2123,16 +2156,17 @@ mod tests {
             order: 0,
             bounds,
             content_mask: ContentMask { bounds },
+            corner_radii,
+            texture_bounds,
             image_buffer,
         });
         scene.finish();
         let mut renderer =
             MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())))
                 .unwrap();
-        let image = renderer
+        renderer
             .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
-            .unwrap();
-        image.get_pixel(8, 8).0
+            .unwrap()
     }
 
     fn assert_near(rendered: [u8; 4], expected: [u8; 4]) {
@@ -2182,5 +2216,57 @@ mod tests {
     fn surface_refuses_formats_it_cannot_sample() {
         assert!(SurfaceCoding::of(u32::from_be_bytes(*b"BGRA")).is_none());
         assert!(SurfaceCoding::of(kCVPixelFormatType_420YpCbCr10BiPlanarFullRange).is_some());
+    }
+
+    #[test]
+    fn rounded_surface_leaves_its_corners_to_the_background() {
+        let white = setup_surface(
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            255,
+            [128, 128],
+            None,
+        );
+        let radius = ScaledPixels(8.0);
+        let corner_radii = Corners {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+        let image = render_shaped_surface(white, corner_radii, FULL_TEXTURE);
+        for (x, y) in [(0, 0), (15, 0), (15, 15), (0, 15)] {
+            assert_near(image.get_pixel(x, y).0, [0, 0, 0, 255]);
+        }
+        assert_near(image.get_pixel(8, 8).0, [255, 255, 255, 255]);
+        assert_near(image.get_pixel(8, 2).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn surface_shows_only_its_texture_bounds() {
+        let image_buffer = setup_surface(
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            255,
+            [128, 128],
+            None,
+        );
+        unsafe {
+            CVPixelBufferLockBaseAddress(&image_buffer, CVPixelBufferLockFlags::empty());
+            let base = CVPixelBufferGetBaseAddressOfPlane(&image_buffer, 0).cast::<u8>();
+            let row = CVPixelBufferGetBytesPerRowOfPlane(&image_buffer, 0);
+            for y in 0..16 {
+                slice::from_raw_parts_mut(base.add(y * row), 8).fill(0);
+            }
+            CVPixelBufferUnlockBaseAddress(&image_buffer, CVPixelBufferLockFlags::empty());
+        }
+        let right_half = Bounds {
+            origin: Point { x: 0.5, y: 0.0 },
+            size: Size {
+                width: 0.5,
+                height: 1.0,
+            },
+        };
+        let image = render_shaped_surface(image_buffer, Corners::default(), right_half);
+        assert_near(image.get_pixel(1, 8).0, [255, 255, 255, 255]);
+        assert_near(image.get_pixel(14, 8).0, [255, 255, 255, 255]);
     }
 }
