@@ -850,12 +850,14 @@ fragment float4 path_sprite_fragment(
 struct SurfaceVertexOutput {
   float4 position [[position]];
   float2 texture_position;
+  uint surface_id [[flat]];
   float clip_distance [[clip_distance]][4];
 };
 
 struct SurfaceFragmentInput {
   float4 position [[position]];
   float2 texture_position;
+  uint surface_id [[flat]];
 };
 
 vertex SurfaceVertexOutput surface_vertex(
@@ -872,12 +874,14 @@ vertex SurfaceVertexOutput surface_vertex(
       to_device_position(unit_vertex, surface.bounds, viewport_size);
   float4 clip_distance = distance_from_clip_rect(unit_vertex, surface.bounds,
                                                  surface.content_mask.bounds);
-  // We are going to copy the whole texture, so the texture position corresponds
-  // to the current vertex of the unit triangle.
-  float2 texture_position = unit_vertex;
+  float2 texture_position =
+      float2(surface.texture_bounds.origin.x, surface.texture_bounds.origin.y) +
+      unit_vertex * float2(surface.texture_bounds.size.width,
+                           surface.texture_bounds.size.height);
   return SurfaceVertexOutput{
       device_position,
       texture_position,
+      surface_id,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -887,13 +891,20 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
                                  texture2d<float> cb_cr_texture
                                  [[texture(SurfaceInputIndex_CbCrTexture)]],
                                  constant float4x4 *ycbcr_to_rgb
-                                 [[buffer(SurfaceInputIndex_YCbCrToRgb)]]) {
+                                 [[buffer(SurfaceInputIndex_YCbCrToRgb)]],
+                                 constant SurfaceBounds *surfaces
+                                 [[buffer(SurfaceInputIndex_Surfaces)]]) {
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
   float4 ycbcr = float4(
       y_texture.sample(texture_sampler, input.texture_position).r,
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
+  SurfaceBounds surface = surfaces[input.surface_id];
+  float distance =
+      quad_sdf(input.position.xy, surface.bounds, surface.corner_radii);
 
-  return saturate(*ycbcr_to_rgb * ycbcr);
+  float4 color = saturate(*ycbcr_to_rgb * ycbcr);
+  color.a *= saturate(0.5 - distance);
+  return color;
 }
 
 float4 hsla_to_rgba(Hsla hsla) {

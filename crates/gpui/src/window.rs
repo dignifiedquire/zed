@@ -5440,23 +5440,51 @@ impl Window {
 
     /// Paint a surface into the scene for the next frame at the current z-index.
     ///
+    /// The image buffer fills `image_bounds`, and only its part inside `bounds` shows, with
+    /// those bounds' corners rounded to `corner_radii`.
+    ///
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub fn paint_surface(
         &mut self,
         bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
         image_buffer: CFRetained<CVPixelBuffer>,
     ) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
-        let bounds = self.snap_bounds(bounds);
+        let visible_bounds = bounds.intersect(&image_bounds);
+        if visible_bounds.size.width <= Pixels::ZERO
+            || visible_bounds.size.height <= Pixels::ZERO
+            || image_bounds.size.width <= Pixels::ZERO
+            || image_bounds.size.height <= Pixels::ZERO
+        {
+            return;
+        }
+        let texture_bounds = Bounds {
+            origin: point(
+                (visible_bounds.origin.x - image_bounds.origin.x) / image_bounds.size.width,
+                (visible_bounds.origin.y - image_bounds.origin.y) / image_bounds.size.height,
+            ),
+            size: size(
+                visible_bounds.size.width / image_bounds.size.width,
+                visible_bounds.size.height / image_bounds.size.height,
+            ),
+        };
+        let corner_radii = corner_radii
+            .clamp_radii_for_quad_size(visible_bounds.size)
+            .scale(self.scale_factor());
+        let bounds = self.snap_bounds(visible_bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,
+            corner_radii,
+            texture_bounds,
             image_buffer,
         });
     }
