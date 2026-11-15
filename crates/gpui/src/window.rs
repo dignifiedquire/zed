@@ -14,9 +14,9 @@ use crate::{
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    MonochromeSprite, MouseButton, MouseDownEvent, MouseEvent, MouseMoveEvent, MouseUpEvent, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
@@ -1303,6 +1303,8 @@ pub struct Window {
     /// The hitbox that has captured the pointer, if any.
     /// While captured, mouse events route to this hitbox regardless of hit testing.
     captured_hitbox: Option<HitboxId>,
+    /// Whether the platform took the press for a window move or resize.
+    did_platform_take_press: Cell<bool>,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
     #[cfg(feature = "profiler")]
@@ -2428,6 +2430,7 @@ impl Window {
             client_inset: None,
             image_cache_stack: Vec::new(),
             captured_hitbox: None,
+            did_platform_take_press: Cell::new(false),
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
             #[cfg(feature = "profiler")]
@@ -2725,6 +2728,7 @@ impl Window {
     /// Start an interactive window resize operation if this window is resizable.
     pub fn start_window_resize(&self, edge: ResizeEdge) {
         if self.is_resizable {
+            self.did_platform_take_press.set(true);
             self.platform_window.start_window_resize(edge);
         }
     }
@@ -3253,6 +3257,7 @@ impl Window {
     ///
     /// Events may not be received during a move operation.
     pub fn start_window_move(&self) {
+        self.did_platform_take_press.set(true);
         self.platform_window.start_window_move()
     }
 
@@ -6281,7 +6286,16 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        self.mouse_hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        if event.is::<MouseDownEvent>() {
+            self.did_platform_take_press.set(false);
+        }
+        // The release of a press the platform took for a move or resize lands
+        // on no hitbox, so it ends drags and selections without a click.
+        self.mouse_hit_test = if event.is::<MouseUpEvent>() && self.did_platform_take_press.take() {
+            HitTest::default()
+        } else {
+            self.rendered_frame.hit_test(self.mouse_position())
+        };
 
         #[cfg(any(feature = "inspector", debug_assertions))]
         if self.is_inspector_picking(cx) {
@@ -9153,6 +9167,80 @@ mod tests {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn test_release_of_a_press_the_platform_took_clicks_nothing(cx: &mut TestAppContext) {
+        let clicks = Rc::new(Cell::new(0));
+        let releases = Rc::new(Cell::new(0));
+        let (_, cx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            let releases = releases.clone();
+            |_, _| TitleBarTarget { clicks, releases }
+        });
+        let position = point(px(10.), px(10.));
+        let press = |cx: &mut crate::VisualTestContext, is_resize: bool| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_event(MouseDownEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+            if is_resize {
+                cx.update(|window, _| window.start_window_resize(crate::ResizeEdge::Right));
+            }
+        };
+        let release = |cx: &mut crate::VisualTestContext| {
+            cx.simulate_event(MouseUpEvent {
+                button: MouseButton::Left,
+                position,
+                click_count: 1,
+                ..Default::default()
+            });
+        };
+
+        press(cx, true);
+        release(cx);
+        assert_eq!((clicks.get(), releases.get()), (0, 1));
+
+        press(cx, false);
+        release(cx);
+        assert_eq!((clicks.get(), releases.get()), (1, 2));
+
+        press(cx, true);
+        press(cx, false);
+        release(cx);
+        assert_eq!((clicks.get(), releases.get()), (2, 3));
+    }
+
+    struct TitleBarTarget {
+        clicks: Rc<Cell<usize>>,
+        releases: Rc<Cell<usize>>,
+    }
+
+    impl Render for TitleBarTarget {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let clicks = self.clicks.clone();
+            let releases = self.releases.clone();
+            div()
+                .id("title-bar")
+                .size_full()
+                .on_click(move |_, _, _| clicks.set(clicks.get() + 1))
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, _| {
+                                if phase == DispatchPhase::Bubble {
+                                    releases.set(releases.get() + 1);
+                                }
+                            });
+                        },
+                    )
+                    .size_full(),
+                )
+        }
     }
 
     struct ZoomTarget {
