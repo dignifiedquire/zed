@@ -986,7 +986,7 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
   SurfaceBounds surface = surfaces[input.surface_id];
   float distance =
-      quad_sdf(input.position.xy, surface.bounds, surface.corner_radii);
+      quad_sdf(input.position.xy, surface.rounded_bounds, surface.corner_radii);
 
   float4 color = saturate(*ycbcr_to_rgb * ycbcr);
   color.a *= saturate(0.5 - distance);

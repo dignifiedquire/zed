@@ -5755,8 +5755,9 @@ impl Window {
             ),
         };
         let corner_radii = corner_radii
-            .clamp_radii_for_quad_size(visible_bounds.size)
+            .clamp_radii_for_quad_size(bounds.size)
             .scale(self.scale_factor());
+        let rounded_bounds = self.snap_bounds(bounds);
         let bounds = self.snap_bounds(visible_bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
@@ -5764,6 +5765,7 @@ impl Window {
             bounds,
             content_mask,
             corner_radii,
+            rounded_bounds,
             texture_bounds,
             orientation,
             image_buffer,

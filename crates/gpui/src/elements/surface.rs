@@ -206,6 +206,41 @@ mod tests {
     }
 
     #[crate::test]
+    fn contain_rounds_the_element_and_not_the_narrower_picture(cx: &mut TestAppContext) {
+        let buffer = setup_buffer(100, 200);
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(100.)), |_, _| {
+            div()
+                .w(px(200.))
+                .h(px(100.))
+                .child(
+                    surface(buffer.clone())
+                        .size_full()
+                        .rounded(px(16.))
+                        .object_fit(ObjectFit::Contain),
+                )
+                .into_any_element()
+        });
+        let (painted, scale_factor) = window.update(|window, _| {
+            let painted = window.rendered_frame.scene.surfaces.last().map(|surface| {
+                (
+                    surface.bounds,
+                    surface.rounded_bounds,
+                    surface.corner_radii.top_left,
+                )
+            });
+            (painted, window.scale_factor())
+        });
+        let (bounds, rounded_bounds, radius) = painted.unwrap();
+        let scaled = |x: f32, y: f32, width: f32, height: f32| {
+            Bounds::new(point(px(x), px(y)), size(px(width), px(height))).scale(scale_factor)
+        };
+        assert_eq!(bounds, scaled(75., 0., 50., 100.));
+        assert_eq!(rounded_bounds, scaled(0., 0., 200., 100.));
+        assert_eq!(radius, px(16.).scale(scale_factor));
+    }
+
+    #[crate::test]
     fn quarter_turned_buffer_fits_by_its_displayed_shape(cx: &mut TestAppContext) {
         let buffer = setup_buffer(200, 100);
         let window = cx.add_empty_window();
