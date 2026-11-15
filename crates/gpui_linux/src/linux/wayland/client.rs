@@ -1,6 +1,7 @@
 use std::{
     cell::{RefCell, RefMut},
     hash::Hash,
+    iter,
     os::{
         fd::{AsRawFd, BorrowedFd, FromRawFd as _, RawFd},
         unix::net::UnixStream,
@@ -2358,6 +2359,32 @@ impl Dispatch<zwp_text_input_v3::ZwpTextInputV3, ()> for WaylandClientStatePtr {
     }
 }
 
+/// Returns the inputs a pointer `leave` dispatches: the exit, then the release
+/// of a button still down.
+fn leave_inputs(
+    position: Point<Pixels>,
+    pressed_button: Option<MouseButton>,
+    modifiers: Modifiers,
+    click_count: usize,
+) -> impl Iterator<Item = PlatformInput> {
+    let exit = PlatformInput::MouseExited(MouseExitEvent {
+        position,
+        pressed_button,
+        modifiers,
+    });
+    // A compositor that takes the pointer for an interactive move or resize
+    // sends `leave` and never the release, so the press ends here.
+    let release = pressed_button.map(|button| {
+        PlatformInput::MouseUp(MouseUpEvent {
+            button,
+            position,
+            modifiers,
+            click_count,
+        })
+    });
+    iter::once(exit).chain(release)
+}
+
 fn linux_button_to_gpui(button: u32) -> Option<MouseButton> {
     // These values are coming from <linux/input-event-codes.h>.
     const BTN_LEFT: u32 = 0x110;
@@ -2435,18 +2462,21 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
             }
             wl_pointer::Event::Leave { .. } => {
                 if let Some(focused_window) = state.mouse_focused_window.clone() {
-                    let input = PlatformInput::MouseExited(MouseExitEvent {
-                        position: state.mouse_location.unwrap(),
-                        pressed_button: state.button_pressed,
-                        modifiers: state.modifiers,
-                    });
+                    let inputs = leave_inputs(
+                        state.mouse_location.unwrap(),
+                        state.button_pressed,
+                        state.modifiers,
+                        state.click.current_count,
+                    );
                     state.mouse_focused_window = None;
                     state.mouse_location = None;
                     state.button_pressed = None;
                     state.cursor_hidden_window = None;
 
                     drop(state);
-                    focused_window.handle_input(input);
+                    for input in inputs {
+                        focused_window.handle_input(input);
+                    }
                     focused_window.set_hovered(false);
                 }
             }
@@ -3209,6 +3239,34 @@ mod tests {
         assert!(wl_output_version(1).is_err());
         assert_eq!(wl_seat_version(5).expect("minimum seat version"), 5);
         assert_eq!(wl_output_version(2).expect("minimum output version"), 2);
+    }
+
+    #[test]
+    fn leave_with_a_button_down_releases_it_after_the_exit() {
+        let position = point(px(40.), px(12.));
+        let inputs = leave_inputs(position, Some(MouseButton::Left), Modifiers::default(), 1)
+            .collect::<Vec<_>>();
+        assert!(matches!(
+            inputs.as_slice(),
+            [
+                PlatformInput::MouseExited(MouseExitEvent {
+                    pressed_button: Some(MouseButton::Left),
+                    ..
+                }),
+                PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: released_at,
+                    ..
+                }),
+            ] if *released_at == position
+        ));
+    }
+
+    #[test]
+    fn leave_without_a_button_down_only_exits() {
+        let inputs =
+            leave_inputs(Point::default(), None, Modifiers::default(), 0).collect::<Vec<_>>();
+        assert!(matches!(inputs.as_slice(), [PlatformInput::MouseExited(_)]));
     }
 
     #[derive(Clone)]
