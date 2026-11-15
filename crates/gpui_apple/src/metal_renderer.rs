@@ -1700,6 +1700,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
             bounds: surface.bounds,
             content_mask: surface.content_mask,
             corner_radii: surface.corner_radii,
+            rounded_bounds: surface.rounded_bounds,
             texture_bounds: surface.texture_bounds,
             rotation: surface.orientation.rotation as u32,
             is_mirrored: u32::from(surface.orientation.is_mirrored),
@@ -2035,6 +2036,7 @@ pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    pub rounded_bounds: Bounds<ScaledPixels>,
     pub texture_bounds: Bounds<f32>,
     /// Clockwise quarter turns.
     pub rotation: u32,
@@ -2253,6 +2255,7 @@ mod tests {
             bounds,
             content_mask: ContentMask { bounds },
             corner_radii: Corners::default(),
+            rounded_bounds: bounds,
             texture_bounds: FULL_TEXTURE,
             orientation: SurfaceOrientation::default(),
             image_buffer: image_buffer.clone(),
@@ -2409,6 +2412,7 @@ mod tests {
             bounds,
             content_mask: ContentMask { bounds },
             corner_radii,
+            rounded_bounds: bounds,
             texture_bounds,
             orientation,
             image_buffer,
@@ -2537,6 +2541,50 @@ mod tests {
         );
         assert_near(image.get_pixel(1, 8).0, [255, 255, 255, 255]);
         assert_near(image.get_pixel(14, 8).0, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn narrow_surface_keeps_its_corners_inside_a_rounded_element() {
+        let white = setup_surface(
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            255,
+            [128, 128],
+            None,
+        );
+        let element = Bounds {
+            origin: Point::default(),
+            size: size(ScaledPixels(16.0), ScaledPixels(16.0)),
+        };
+        let picture = Bounds {
+            origin: point(ScaledPixels(4.0), ScaledPixels(0.0)),
+            size: size(ScaledPixels(8.0), ScaledPixels(16.0)),
+        };
+        let radius = ScaledPixels(4.0);
+        let mut scene = Scene::default();
+        scene.insert_primitive(PaintSurface {
+            order: 0,
+            bounds: picture,
+            content_mask: ContentMask { bounds: element },
+            corner_radii: Corners {
+                top_left: radius,
+                top_right: radius,
+                bottom_right: radius,
+                bottom_left: radius,
+            },
+            rounded_bounds: element,
+            texture_bounds: FULL_TEXTURE,
+            orientation: SurfaceOrientation::default(),
+            image_buffer: white,
+        });
+        scene.finish();
+        let image =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())))
+                .unwrap()
+                .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+                .unwrap();
+        for (x, y) in [(4, 0), (11, 0), (11, 15), (4, 15)] {
+            assert_near(image.get_pixel(x, y).0, [255, 255, 255, 255]);
+        }
     }
 
     #[test]

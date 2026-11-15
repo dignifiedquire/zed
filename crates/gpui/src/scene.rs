@@ -770,6 +770,8 @@ pub struct PaintSurface {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    /// The bounds whose corners `corner_radii` round, which may reach past `bounds`.
+    pub rounded_bounds: Bounds<ScaledPixels>,
     /// The part of the image the bounds show, in fractions of its size as displayed.
     pub texture_bounds: Bounds<f32>,
     pub orientation: SurfaceOrientation,
