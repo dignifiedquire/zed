@@ -3339,6 +3339,9 @@ impl Window {
     }
 
     pub(crate) fn button_layout_changed(&mut self, cx: &mut App) {
+        // Views read the layout while they render, so the window must redraw
+        // even when no observer asks for it.
+        self.refresh();
         self.button_layout_observers
             .clone()
             .retain(|callback| callback(self, cx));
@@ -9151,6 +9154,16 @@ mod tests {
                 Empty
             }
         }
+    }
+
+    #[gpui::test]
+    fn test_button_layout_change_redraws_the_window(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform_window = cx.test_window(window.into());
+        platform_window.simulate_frame_request(RequestFrameOptions::default());
+        let wakes = platform_window.frame_wake_count();
+        platform_window.simulate_button_layout_change();
+        assert!(platform_window.frame_wake_count() > wakes);
     }
 
     #[gpui::test]

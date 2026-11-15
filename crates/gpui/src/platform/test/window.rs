@@ -52,6 +52,7 @@ pub(crate) struct TestWindowState {
     moved_callback: Option<Box<dyn FnMut()>>,
     display_changed_callback: Option<Box<dyn FnMut()>>,
     appearance_change_callback: Option<Box<dyn FnMut()>>,
+    button_layout_change_callback: Option<Box<dyn FnMut()>>,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     frame_wake_count: Rc<Cell<usize>>,
     frame_scheduled: bool,
@@ -133,6 +134,7 @@ impl TestWindow {
             hit_test_native_view_callback: None,
             native_view_focused_callback: None,
             key_down_before_native_view_callback: None,
+            button_layout_change_callback: None,
             request_frame_callback: None,
             frame_wake_count: Rc::new(Cell::new(0)),
             frame_scheduled: false,
@@ -339,6 +341,17 @@ impl TestWindow {
         drop(lock);
         callback();
         self.0.lock().appearance_change_callback = Some(callback);
+    }
+
+    /// Delivers a change of the platform's window button layout.
+    pub fn simulate_button_layout_change(&self) {
+        let mut lock = self.0.lock();
+        let Some(mut callback) = lock.button_layout_change_callback.take() else {
+            return;
+        };
+        drop(lock);
+        callback();
+        self.0.lock().button_layout_change_callback = Some(callback);
     }
 
     /// Returns how many times this window's frame waker has been invoked.
@@ -669,6 +682,10 @@ impl PlatformWindow for TestWindow {
 
     fn on_appearance_changed(&self, callback: Box<dyn FnMut()>) {
         self.0.lock().appearance_change_callback = Some(callback);
+    }
+
+    fn on_button_layout_changed(&self, callback: Box<dyn FnMut()>) {
+        self.0.lock().button_layout_change_callback = Some(callback);
     }
 
     fn draw(&self, scene: &Scene) {
