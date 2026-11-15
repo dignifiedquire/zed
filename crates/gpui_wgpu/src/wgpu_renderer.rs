@@ -2655,6 +2655,54 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn magnified_image_shows_none_of_its_atlas_neighbour() -> anyhow::Result<()> {
+        let mut renderer = WgpuHeadlessRenderer::new()?;
+        let atlas = PlatformHeadlessRenderer::sprite_atlas(&renderer);
+        let mut insert = |image_id, bgra: [u8; 4]| {
+            let key = gpui::AtlasKey::Image(gpui::RenderImageParams {
+                image_id: gpui::ImageId(image_id),
+                frame_index: 0,
+            });
+            atlas
+                .get_or_insert_with(key, &mut || {
+                    Ok(Some((
+                        device_size(4, 4),
+                        std::borrow::Cow::Owned(bgra.repeat(16)),
+                    )))
+                })?
+                .context("no tile for the image")
+        };
+        let red = insert(1, [0, 0, 255, 255])?;
+        insert(2, [255, 0, 0, 255])?;
+        let bounds = Bounds {
+            origin: Point::default(),
+            size: Size {
+                width: 16.0.into(),
+                height: 16.0.into(),
+            },
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            tile: red,
+            grayscale: false.into(),
+            opacity: 1.0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+        });
+        scene.finish();
+
+        let image = renderer.render_scene_to_image(&scene, device_size(16, 16))?;
+        for (x, y) in [(0, 8), (15, 8), (8, 0), (8, 15)] {
+            assert_pixel(&image, x, y, RED);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn headless_renderer_captures_each_requested_size() -> anyhow::Result<()> {
         let mut renderer = WgpuHeadlessRenderer::new()?;
         let mut scene = Scene::default();

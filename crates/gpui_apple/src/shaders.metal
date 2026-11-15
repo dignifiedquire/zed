@@ -20,6 +20,8 @@ float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bo
 
 float2 to_tile_position(float2 unit_vertex, AtlasTile tile,
                         constant Size_DevicePixels *atlas_size);
+float2 clamp_to_tile(float2 tile_position, AtlasTile tile,
+                     texture2d<float> atlas_texture);
 float4 distance_from_clip_rect_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
                                Bounds_ScaledPixels clip_bounds, TransformationMatrix transformation);
 
@@ -747,13 +749,16 @@ fragment float4 polychrome_sprite_fragment(
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float4 color =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  // The tile clamps the sample even on the simple path, so the sprite loads
+  // before the flag is checked.
+  PolychromeSprite sprite = sprites[input.sprite_id & ~SIMPLE_PRIMITIVE_FLAG];
+  float4 color = atlas_texture.sample(
+      atlas_texture_sampler,
+      clamp_to_tile(input.tile_position, sprite.tile, atlas_texture));
   if ((input.sprite_id & SIMPLE_PRIMITIVE_FLAG) != 0u) {
     return float4(color.rgb, color.a * input.opacity);
   }
 
-  PolychromeSprite sprite = sprites[input.sprite_id];
   if (sprite.grayscale) {
     float grayscale = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
     color.r = grayscale;
@@ -1155,6 +1160,19 @@ float2 to_tile_position(float2 unit_vertex, AtlasTile tile,
   float2 tile_size = float2(tile.bounds.size.width, tile.bounds.size.height);
   return (tile_origin + unit_vertex * tile_size) /
          float2((float)atlas_size->width, (float)atlas_size->height);
+}
+
+// Keeps a linear sample half a texel inside its tile. A sprite drawn larger
+// than its tile, or between device pixels, otherwise blends in the edge of
+// whatever sits beside it in the atlas.
+float2 clamp_to_tile(float2 tile_position, AtlasTile tile,
+                     texture2d<float> atlas_texture) {
+  float2 atlas_size =
+      float2(atlas_texture.get_width(), atlas_texture.get_height());
+  float2 tile_origin = float2(tile.bounds.origin.x, tile.bounds.origin.y);
+  float2 tile_size = float2(tile.bounds.size.width, tile.bounds.size.height);
+  return clamp(tile_position, (tile_origin + 0.5) / atlas_size,
+               (tile_origin + tile_size - 0.5) / atlas_size);
 }
 
 // Selects corner radius based on quadrant.
