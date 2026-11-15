@@ -2727,7 +2727,7 @@ mod tests {
     fn magnified_image_shows_none_of_its_atlas_neighbour() -> anyhow::Result<()> {
         let mut renderer = WgpuHeadlessRenderer::new()?;
         let atlas = PlatformHeadlessRenderer::sprite_atlas(&renderer);
-        let mut insert = |image_id, bgra: [u8; 4]| {
+        let insert = |image_id, bgra: [u8; 4]| {
             let key = gpui::AtlasKey::Image(gpui::RenderImageParams {
                 image_id: gpui::ImageId(image_id),
                 frame_index: 0,
