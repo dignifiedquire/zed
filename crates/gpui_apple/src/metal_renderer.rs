@@ -2540,6 +2540,50 @@ mod tests {
     }
 
     #[test]
+    fn magnified_image_shows_none_of_its_atlas_neighbour() {
+        let mut renderer =
+            MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())))
+                .unwrap();
+        let atlas = renderer.sprite_atlas().clone();
+        let insert = |image_id, bgra: [u8; 4]| {
+            let key = gpui::AtlasKey::Image(gpui::RenderImageParams {
+                image_id: gpui::ImageId(image_id),
+                frame_index: 0,
+            });
+            gpui::PlatformAtlas::get_or_insert_with(atlas.as_ref(), key, &mut || {
+                let tile_size = size(DevicePixels(4), DevicePixels(4));
+                Ok(Some((tile_size, std::borrow::Cow::Owned(bgra.repeat(16)))))
+            })
+            .unwrap()
+            .unwrap()
+        };
+        let red = insert(1, [0, 0, 255, 255]);
+        insert(2, [255, 0, 0, 255]);
+        let bounds = Bounds {
+            origin: Point::default(),
+            size: size(ScaledPixels(16.0), ScaledPixels(16.0)),
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(gpui::PolychromeSprite {
+            order: 0,
+            pad: 0,
+            tile: red,
+            grayscale: false.into(),
+            opacity: 1.0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii: Corners::default(),
+        });
+        scene.finish();
+        let image = renderer
+            .render_scene_to_image(&scene, size(DevicePixels(16), DevicePixels(16)))
+            .unwrap();
+        for (x, y) in [(0, 8), (15, 8), (8, 0), (8, 15)] {
+            assert_near(image.get_pixel(x, y).0, [255, 0, 0, 255]);
+        }
+    }
+
+    #[test]
     fn quarter_turn_shows_the_buffer_s_left_half_at_the_top() {
         let turned = SurfaceOrientation {
             rotation: SurfaceRotation::Clockwise90,
