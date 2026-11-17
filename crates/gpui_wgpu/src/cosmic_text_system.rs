@@ -1057,7 +1057,7 @@ impl CosmicTextSystemState {
 }
 
 #[inline(always)]
-/// Returns the variation coordinates that set `font`'s weight axis to `weight`.
+/// Returns `font`'s variation coordinates with its weight axis at `weight`.
 fn weight_coords(font: &CosmicTextFont, weight: Weight) -> Vec<NormalizedCoord> {
     font.as_swash()
         .variations()
