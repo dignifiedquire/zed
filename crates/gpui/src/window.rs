@@ -7759,7 +7759,7 @@ impl Window {
         self.a11y.debug_tree_json()
     }
 
-    /// Returns the accessibility tree update of the last frame that built one,
+    /// Returns the accessibility tree update of the latest frame with a tree,
     /// as the platform adapter receives it.
     pub fn last_a11y_tree_update(&self) -> Option<&accesskit::TreeUpdate> {
         self.a11y.last_tree_update()
