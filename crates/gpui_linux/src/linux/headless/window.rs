@@ -277,6 +277,8 @@ impl PlatformWindow for HeadlessWindow {
 }
 
 /// The executors a headless window schedules its frames on.
+// Only `headless-rendering` schedules frames.
+#[cfg_attr(not(feature = "headless-rendering"), allow(dead_code))]
 pub(crate) struct HeadlessExecutors {
     pub(crate) foreground: gpui::ForegroundExecutor,
     pub(crate) background: gpui::BackgroundExecutor,
