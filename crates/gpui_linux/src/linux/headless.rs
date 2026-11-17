@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 use gpui::{AnyWindowHandle, PlatformDisplay, PlatformWindow, WindowParams};
 
-pub(crate) use window::HeadlessWindow;
+pub(crate) use window::{HeadlessExecutors, HeadlessWindow};
 
 /// The state of a `LinuxPlatform` with no display server.
 ///
@@ -13,12 +13,14 @@ pub(crate) use window::HeadlessWindow;
 pub(crate) struct HeadlessConnection {
     /// Cloned into every open window, so its count tells whether windows are open.
     window_lease: Rc<()>,
+    executors: HeadlessExecutors,
 }
 
 impl HeadlessConnection {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(executors: HeadlessExecutors) -> Self {
         Self {
             window_lease: Rc::new(()),
+            executors,
         }
     }
 
@@ -42,6 +44,7 @@ impl HeadlessConnection {
         Ok(Box::new(HeadlessWindow::new(
             params,
             self.window_lease.clone(),
+            &self.executors,
         )))
     }
 }

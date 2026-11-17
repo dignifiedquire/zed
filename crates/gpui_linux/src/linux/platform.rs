@@ -32,7 +32,7 @@ use gpui_util::{ResultExt as _, new_std_command};
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{
-    Backend, DisplayConnection, HeadlessConnection, LinuxDispatcher, PriorityQueueCalloopReceiver,
+    Backend, DisplayConnection, HeadlessConnection, HeadlessExecutors, LinuxDispatcher, PriorityQueueCalloopReceiver,
     select_backend,
 };
 use gpui::{
@@ -335,11 +335,12 @@ impl LinuxPlatform {
         let loop_handle = event_loop.handle();
         LinuxCommon::register_sources(&common, &loop_handle, main_receiver, power_receiver)
             .expect("failed to register Linux event sources");
+        let headless = HeadlessConnection::new(headless_executors(&common));
         Self {
             common,
             event_loop: RefCell::new(Some(event_loop)),
             loop_handle,
-            connection: RefCell::new(DisplayConnection::Headless(HeadlessConnection::new())),
+            connection: RefCell::new(DisplayConnection::Headless(headless)),
             allowed_modes,
             initial_windowing: RefCell::new(None),
             startup_environment: RefCell::new(Some(startup)),
@@ -484,7 +485,9 @@ impl LinuxPlatform {
         } else {
             match mode {
                 WindowingRequest::Headless => {
-                    self.replace_connection(DisplayConnection::Headless(HeadlessConnection::new()));
+                    self.replace_connection(DisplayConnection::Headless(HeadlessConnection::new(
+                        headless_executors(&self.common),
+                    )));
                     Ok(())
                 }
                 WindowingRequest::Windowed(environment) => {
@@ -554,9 +557,20 @@ impl LinuxPlatform {
     }
 }
 
+/// Returns the executors the windows of a headless connection run on.
+fn headless_executors(common: &Rc<RefCell<LinuxCommon>>) -> HeadlessExecutors {
+    let common = common.borrow();
+    HeadlessExecutors {
+        foreground: common.foreground_executor.clone(),
+        background: common.background_executor.clone(),
+    }
+}
+
 impl Drop for LinuxPlatform {
     fn drop(&mut self) {
-        self.replace_connection(DisplayConnection::Headless(HeadlessConnection::new()));
+        self.replace_connection(DisplayConnection::Headless(HeadlessConnection::new(
+                        headless_executors(&self.common),
+                    )));
         #[cfg(feature = "x11")]
         crate::linux::wait_for_clipboard_handovers();
     }
