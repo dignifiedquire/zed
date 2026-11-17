@@ -230,6 +230,13 @@ impl PlatformWindow for HeadlessWindow {
 
     fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
 
+    /// Turns the accessibility tree on at once for readers inside the process,
+    /// because no screen reader can connect to a headless window.
+    #[cfg(feature = "headless-rendering")]
+    fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        (callbacks.activation)();
+    }
+
     fn draw(&self, scene: &Scene) {
         #[cfg(feature = "headless-rendering")]
         {
@@ -372,7 +379,11 @@ mod rendering {
 
 #[cfg(all(test, feature = "headless-rendering"))]
 mod tests {
-    use std::{cell::Cell, time::Duration};
+    use std::{
+        cell::Cell,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use gpui::{
         BackgroundExecutor, BorderStyle, ContentMask, Corners, Edges, ForegroundExecutor, Hsla,
@@ -451,6 +462,24 @@ mod tests {
         assert!(red[0] > 200 && red[2] < 50, "{red:?}");
         assert!(blue[2] > 200 && blue[0] < 50, "{blue:?}");
         Ok(())
+    }
+
+    #[test]
+    fn window_turns_its_accessibility_tree_on_at_once() {
+        let (window, _) = setup_window(10.0, 10.0);
+        let activations = Arc::new(AtomicUsize::new(0));
+        window.a11y_init(gpui::A11yCallbacks {
+            activation: Box::new({
+                let activations = activations.clone();
+                move || {
+                    activations.fetch_add(1, Ordering::SeqCst);
+                    None
+                }
+            }),
+            action: Box::new(|_| {}),
+            deactivation: Box::new(|| {}),
+        });
+        assert_eq!(activations.load(Ordering::SeqCst), 1);
     }
 
     #[test]
