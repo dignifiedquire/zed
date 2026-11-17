@@ -3157,6 +3157,13 @@ impl Window {
         self.platform_window.is_simple_fullscreen()
     }
 
+    /// Runs the window's appearance observers, as a change of the OS appearance
+    /// does, for a test whose platform window reports no change.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_appearance_change(&mut self, cx: &mut App) {
+        self.appearance_changed(cx);
+    }
+
     pub(crate) fn appearance_changed(&mut self, cx: &mut App) {
         self.appearance = self.platform_window.appearance();
 
@@ -7394,6 +7401,12 @@ impl Window {
         self.a11y.debug_tree_json()
     }
 
+    /// Returns the accessibility tree update of the last frame that built one,
+    /// as the platform adapter receives it.
+    pub fn last_a11y_tree_update(&self) -> Option<&accesskit::TreeUpdate> {
+        self.a11y.last_tree_update()
+    }
+
     /// Register a listener for an accessibility action on a specific node.
     /// The listener will be called when a screen reader requests the given
     /// action on the node identified by `node_id`.
@@ -9426,6 +9439,26 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(observed_appearance.get(), Some(WindowAppearance::Dark));
+    }
+
+    #[gpui::test]
+    fn simulated_appearance_change_runs_the_appearance_observers(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let changes = Rc::new(Cell::new(0));
+        let _subscription = window
+            .update(cx, {
+                let changes = changes.clone();
+                move |_, window, _| {
+                    window.observe_window_appearance(move |_, _| changes.set(changes.get() + 1))
+                }
+            })
+            .unwrap();
+
+        window
+            .update(cx, |_, window, cx| window.simulate_appearance_change(cx))
+            .unwrap();
+
+        assert_eq!(changes.get(), 1);
     }
 
     #[gpui::test]
