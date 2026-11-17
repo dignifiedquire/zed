@@ -32,8 +32,8 @@ use gpui_util::{ResultExt as _, new_std_command};
 use xkbcommon::xkb::{self, Keycode, Keysym, State};
 
 use crate::linux::{
-    Backend, DisplayConnection, HeadlessConnection, HeadlessExecutors, LinuxDispatcher, PriorityQueueCalloopReceiver,
-    select_backend,
+    Backend, DisplayConnection, HeadlessConnection, HeadlessExecutors, LinuxDispatcher,
+    PriorityQueueCalloopReceiver, select_backend,
 };
 use gpui::{
     Action, ActivityGuard, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle,
@@ -569,8 +569,8 @@ fn headless_executors(common: &Rc<RefCell<LinuxCommon>>) -> HeadlessExecutors {
 impl Drop for LinuxPlatform {
     fn drop(&mut self) {
         self.replace_connection(DisplayConnection::Headless(HeadlessConnection::new(
-                        headless_executors(&self.common),
-                    )));
+            headless_executors(&self.common),
+        )));
         #[cfg(feature = "x11")]
         crate::linux::wait_for_clipboard_handovers();
     }

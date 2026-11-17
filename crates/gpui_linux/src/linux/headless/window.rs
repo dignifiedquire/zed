@@ -257,11 +257,9 @@ impl PlatformWindow for HeadlessWindow {
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         let mut state = self.0.borrow_mut();
         let size = rendering::device_size(state.bounds.size);
-        let renderer = state
-            .frames
-            .renderer
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("this headless window found no GPU adapter to draw with"))?;
+        let renderer = state.frames.renderer.as_mut().ok_or_else(|| {
+            anyhow::anyhow!("this headless window found no GPU adapter to draw with")
+        })?;
         renderer.render_scene_to_image(scene, size)
     }
 
@@ -363,7 +361,11 @@ mod rendering {
                 signal_source: FrameRequestSource::LocalSchedule,
                 ..RequestFrameOptions::default()
             });
-            state.borrow_mut().frames.request_frame.get_or_insert(callback);
+            state
+                .borrow_mut()
+                .frames
+                .request_frame
+                .get_or_insert(callback);
         }
     }
 }
@@ -413,8 +415,14 @@ mod tests {
 
     fn solid_quad(x: f32, width: f32, color: Hsla) -> Quad {
         let bounds = Bounds {
-            origin: Point { x: x.into(), y: 0.0.into() },
-            size: Size { width: width.into(), height: 32.0.into() },
+            origin: Point {
+                x: x.into(),
+                y: 0.0.into(),
+            },
+            size: Size {
+                width: width.into(),
+                height: 32.0.into(),
+            },
         };
         Quad {
             order: 0,
