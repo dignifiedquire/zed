@@ -22,6 +22,8 @@ font-kit = ["gpui_macos/font-kit"]
 inspector = ["gpui/inspector"]
 test-support = ["gpui/test-support", "gpui_macos/test-support", "gpui_windows/test-support", "gpui_wgpu/test-support"]
 screen-capture = ["gpui/screen-capture", "gpui_macos/screen-capture", "gpui_windows/screen-capture", "gpui_linux/screen-capture"]
+# Headless Linux windows draw offscreen, for tests of whole apps without a display server.
+headless-rendering = ["gpui_linux/headless-rendering"]
 runtime_shaders = ["gpui_macos/runtime_shaders", "gpui_ios/runtime_shaders"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]

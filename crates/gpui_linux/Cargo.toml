@@ -15,6 +15,10 @@ doctest = false
 [features]
 default = ["wayland", "x11"]
 test-support = ["gpui/test-support"]
+# Headless windows draw offscreen through gpui_wgpu, driven by a frame timer,
+# and render_to_image reads them back. For tests of whole apps without a
+# display server.
+headless-rendering = ["test-support", "gpui_wgpu/test-support", "dep:image"]
 wayland = [
     "dep:accesskit_unix",
     "gpui_wgpu",
@@ -64,6 +68,7 @@ gpui_util.workspace = true
 gpui_wgpu = { workspace = true, optional = true, features = ["font-kit"] }
 http_client.workspace = true
 libc.workspace = true
+image = { workspace = true, optional = true }
 log.workspace = true
 parking_lot.workspace = true
 smallvec.workspace = true
