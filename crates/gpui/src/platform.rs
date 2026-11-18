@@ -1541,6 +1541,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
         None
     }
 
+    /// Takes the handler of [`PlatformWindow::on_should_close`], so that a test
+    /// can call it outside the window's update, or returns `None` where the
+    /// platform window keeps no handler.
+    #[cfg(any(test, feature = "test-support"))]
+    fn take_should_close(&self) -> Option<Box<dyn FnMut() -> bool>> {
+        None
+    }
+
     /// Renders the given scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.

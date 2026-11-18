@@ -179,6 +179,26 @@ impl AsyncApp {
         lock.update(f)
     }
 
+    /// Asks `window` whether it closes, as the platform asks on a click of its
+    /// close button, and returns the answer, or `None` where the platform
+    /// window keeps no handler. The window stays open either way.
+    ///
+    /// The handler updates the window, so it runs between two updates.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn simulate_close_request(&mut self, window: AnyWindowHandle) -> Result<Option<bool>> {
+        let handler = self.update_window(window, |_, window, _| {
+            window.platform_window.take_should_close()
+        })?;
+        let Some(mut handler) = handler else {
+            return Ok(None);
+        };
+        let should_close = handler();
+        self.update_window(window, |_, window, _| {
+            window.platform_window.on_should_close(handler);
+        })?;
+        Ok(Some(should_close))
+    }
+
     /// Arrange for the given callback to be invoked whenever the given entity emits an event of a given type.
     /// The callback is provided a handle to the emitting entity and a reference to the emitted event.
     pub fn subscribe<T, Event>(

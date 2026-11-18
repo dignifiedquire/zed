@@ -720,6 +720,11 @@ impl PlatformWindow for TestWindow {
         Some(self)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    fn take_should_close(&self) -> Option<Box<dyn FnMut() -> bool>> {
+        self.0.lock().should_close_handler.take()
+    }
+
     #[cfg(target_os = "windows")]
     fn get_raw_handle(&self) -> windows::Win32::Foundation::HWND {
         unimplemented!()

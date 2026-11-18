@@ -10010,6 +10010,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn simulated_close_request_asks_the_handler_and_keeps_it(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let asked = Rc::new(Cell::new(0));
+        window
+            .update(cx, {
+                let asked = asked.clone();
+                move |_, window, cx| {
+                    window.on_window_should_close(cx, move |_, _| {
+                        asked.set(asked.get() + 1);
+                        false
+                    })
+                }
+            })
+            .unwrap();
+        let mut async_cx = cx.to_async();
+
+        let answers = [(); 2].map(|()| async_cx.simulate_close_request(window.into()).unwrap());
+
+        assert_eq!(answers, [Some(false), Some(false)]);
+        assert_eq!(asked.get(), 2);
+        assert_eq!(cx.windows().len(), 1);
+    }
+
+    #[gpui::test]
     fn queued_frame_callback_wakes_a_parked_render_loop(cx: &mut TestAppContext) {
         let window = cx.add_window(|_, _| Empty);
         let test_window = cx.test_window(window.into());
