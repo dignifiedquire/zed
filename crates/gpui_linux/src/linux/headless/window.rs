@@ -33,6 +33,9 @@ struct HeadlessWindowState {
     input_handler: Option<PlatformInputHandler>,
     title: Option<String>,
     is_fullscreen: bool,
+    /// The handler a test asks in place of the compositor's close request.
+    #[cfg(feature = "test-support")]
+    should_close: Option<Box<dyn FnMut() -> bool>>,
     #[cfg(feature = "headless-rendering")]
     frames: rendering::Frames,
 }
@@ -64,6 +67,8 @@ impl HeadlessWindow {
             input_handler: None,
             title: None,
             is_fullscreen: false,
+            #[cfg(feature = "test-support")]
+            should_close: None,
             #[cfg(feature = "headless-rendering")]
             frames: rendering::Frames::new(),
         }));
@@ -221,7 +226,19 @@ impl PlatformWindow for HeadlessWindow {
 
     fn on_display_changed(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn on_should_close(&self, _callback: Box<dyn FnMut() -> bool>) {}
+    fn on_should_close(&self, callback: Box<dyn FnMut() -> bool>) {
+        #[cfg(feature = "test-support")]
+        {
+            self.0.borrow_mut().should_close = Some(callback);
+        }
+        #[cfg(not(feature = "test-support"))]
+        drop(callback);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn take_should_close(&self) -> Option<Box<dyn FnMut() -> bool>> {
+        self.0.borrow_mut().should_close.take()
+    }
 
     fn on_close(&self, _callback: Box<dyn FnOnce()>) {}
 
