@@ -611,7 +611,11 @@ impl CosmicTextSystemState {
     ) -> Result<swash::scale::image::Image> {
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
-        let pixel_size = f32::from(params.font_size);
+        let pixel_size = if params.is_emoji {
+            f32::from(params.font_size) * emoji_scale(params.font_size)
+        } else {
+            f32::from(params.font_size)
+        };
 
         let subpixel_offset = Vector::new(
             params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor,
@@ -915,6 +919,10 @@ impl CosmicTextSystemState {
             )
         });
 
+        let emoji_scale = emoji_scale(font_size);
+        // Emoji draw larger than shaped. Each entry holds an emoji's left edge and the advance
+        // it gains.
+        let mut emoji_growth: SmallVec<[(f32, f32); 4]> = SmallVec::new();
         let mut runs: Vec<ShapedRun> = Vec::new();
         for glyph in &layout.glyphs {
             let mut font_id = FontId(glyph.metadata);
@@ -945,6 +953,10 @@ impl CosmicTextSystemState {
                 continue;
             }
 
+            if is_emoji && emoji_scale > 1. {
+                emoji_growth.push((glyph.x, glyph.w * (emoji_scale - 1.)));
+            }
+
             let shaped_glyph = ShapedGlyph {
                 id: GlyphId(glyph.glyph_id as u32),
                 position: point(glyph.x.into(), glyph.y.into()),
@@ -965,13 +977,29 @@ impl CosmicTextSystemState {
             }
         }
 
+        // Every glyph moves right by the advance the emoji left of it gain. A right-to-left
+        // line lists its glyphs from the right, so the emoji are sorted by position first.
+        emoji_growth.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut growth = 0.;
+        for (_, added) in &mut emoji_growth {
+            growth += *added;
+            *added = growth;
+        }
+        for glyph in runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
+            let x = f32::from(glyph.position.x);
+            let left = emoji_growth.partition_point(|(emoji_x, _)| *emoji_x < x);
+            if let Some((_, shift)) = left.checked_sub(1).and_then(|ix| emoji_growth.get(ix)) {
+                glyph.position.x += Pixels::from(*shift);
+            }
+        }
+
         if let Some((sink, missing_glyphs)) = self.missing_glyph_sink.as_ref().zip(missing_glyphs) {
             sink.report(missing_glyphs);
         }
 
         LineLayout {
             font_size,
-            width: layout.w.into(),
+            width: (layout.w + growth).into(),
             ascent: layout.max_ascent.into(),
             descent: layout.max_descent.into(),
             runs,
@@ -1450,6 +1478,16 @@ fn emoji_presentation_clusters(
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     // TODO: Include other common emoji fonts
     postscript_name == "NotoColorEmoji"
+}
+
+/// Returns the factor emoji grow by at a font size.
+fn emoji_scale(font_size: Pixels) -> f32 {
+    // CoreText draws Apple Color Emoji 1.25 times as large up to 16 px, and the factor
+    // falls to 1 at 24 px. Noto Color Emoji's art fills about 1.1 times the em of Apple's,
+    // so 0.9 of that factor matches macOS. Large emoji keep their size.
+    let size = f32::from(font_size);
+    let core_text_size = (size * 1.25).min(12. + size / 2.).max(size);
+    (0.9 * core_text_size / size).max(1.)
 }
 
 #[cfg(test)]
@@ -2378,6 +2416,95 @@ mod tests {
         let emoji_font = emoji_font_id(&text_system)?;
         let after = layout_in(&text_system, &font, "❤\u{fe0f}")?;
         assert_eq!(glyph_faces(&after), [(emoji_font, true)]);
+        Ok(())
+    }
+
+    fn layout_at(text_system: &CosmicTextSystem, text: &str, font_size: f32) -> Result<LineLayout> {
+        let font_id = text_system.font_id(&plex_falling_back_to_dejavu())?;
+        let runs = [FontRun {
+            len: text.len(),
+            font_id,
+        }];
+        Ok(text_system.layout_line(text, gpui::px(font_size), &runs))
+    }
+
+    fn emoji_advance_and_height_per_em(
+        text_system: &CosmicTextSystem,
+        font_size: f32,
+    ) -> Result<(f32, f32)> {
+        let layout = layout_at(text_system, "😀😀", font_size)?;
+        let run = layout.runs.first().context("no run")?;
+        let [first, second] = run.glyphs.as_slice() else {
+            anyhow::bail!("{} glyphs", run.glyphs.len());
+        };
+        let params = RenderGlyphParams {
+            font_id: run.font_id,
+            glyph_id: first.id,
+            font_size: gpui::px(font_size),
+            subpixel_variant: point(0, 0),
+            scale_factor: 1.0,
+            is_emoji: first.is_emoji,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let height = text_system.glyph_raster_bounds(&params)?.size.height.0 as f32;
+        let advance = f32::from(second.position.x - first.position.x);
+        Ok((advance / font_size, height / font_size))
+    }
+
+    #[test]
+    fn emoji_at_text_sizes_draw_and_advance_larger_than_large_emoji() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        let (body_advance, body_height) = emoji_advance_and_height_per_em(&text_system, 16.)?;
+        let (large_advance, large_height) = emoji_advance_and_height_per_em(&text_system, 32.)?;
+        let (larger_advance, larger_height) = emoji_advance_and_height_per_em(&text_system, 64.)?;
+        assert!(
+            body_height > large_height * 1.1,
+            "{body_height} <= {large_height} * 1.1"
+        );
+        assert!(
+            body_advance > large_advance * 1.1,
+            "{body_advance} <= {large_advance} * 1.1"
+        );
+        assert!(
+            (larger_height - large_height).abs() < 0.05,
+            "{larger_height} != {large_height}"
+        );
+        assert!(
+            (larger_advance - large_advance).abs() < 0.01,
+            "{larger_advance} != {large_advance}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn emoji_in_right_to_left_text_push_the_glyphs_right_of_them() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        let emoji_advance = f32::from(layout_at(&text_system, "😀", 16.)?.width);
+        let layout = layout_at(&text_system, "\u{05d0}😀\u{05d1}😀\u{05d2}", 16.)?;
+        let mut positions: Vec<(f32, bool)> = layout
+            .runs
+            .iter()
+            .flat_map(|run| &run.glyphs)
+            .map(|glyph| (f32::from(glyph.position.x), glyph.is_emoji))
+            .collect();
+        positions.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let emoji_and_right: Vec<(f32, f32)> = positions
+            .windows(2)
+            .filter_map(|pair| match pair {
+                [(emoji_x, true), (right_x, _)] => Some((*emoji_x, *right_x)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(emoji_and_right.len(), 2, "{positions:?}");
+        for (emoji_x, right_x) in emoji_and_right {
+            assert!(
+                (right_x - emoji_x - emoji_advance).abs() < 0.01,
+                "{right_x} - {emoji_x} != {emoji_advance} in {positions:?}"
+            );
+        }
         Ok(())
     }
 }
