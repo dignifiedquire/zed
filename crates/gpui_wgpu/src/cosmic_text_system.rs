@@ -610,7 +610,7 @@ impl CosmicTextSystemState {
     ) -> Result<swash::scale::image::Image> {
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
-        let pixel_size = if params.is_emoji {
+        let pixel_size = if params.is_emoji && params.glyph_id.0 != 0 {
             f32::from(params.font_size) * emoji_scale(params.font_size)
         } else {
             f32::from(params.font_size)
@@ -954,7 +954,7 @@ impl CosmicTextSystemState {
                 continue;
             }
 
-            if is_emoji && emoji_scale > 1. {
+            if is_emoji && glyph.glyph_id != 0 && emoji_scale > 1. {
                 emoji_growth.push((glyph.x, glyph.w * (emoji_scale - 1.)));
                 let metrics = loaded_font.font.as_swash().metrics(&[]);
                 let units = f32::from(font_size) * emoji_scale / f32::from(metrics.units_per_em);
@@ -2571,6 +2571,30 @@ mod tests {
                 "{font_size} px: bottom {bottom} below {descent}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_glyphs_of_the_emoji_font_keep_their_advance() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        let missing_advance_per_em = |font_size: f32| -> Result<f32> {
+            let layout = layout_at(&text_system, "😀🏽x", font_size)?;
+            let glyphs: Vec<&ShapedGlyph> =
+                layout.runs.iter().flat_map(|run| &run.glyphs).collect();
+            let missing = glyphs
+                .iter()
+                .position(|glyph| glyph.id.0 == 0)
+                .context("no missing glyph")?;
+            let Some([missing, next]) = glyphs.get(missing..missing + 2) else {
+                anyhow::bail!("no glyph after the missing one");
+            };
+            assert!(missing.is_emoji);
+            Ok(f32::from(next.position.x - missing.position.x) / font_size)
+        };
+        let body = missing_advance_per_em(16.)?;
+        let large = missing_advance_per_em(32.)?;
+        assert!((body - large).abs() < 0.01, "{body} != {large}");
         Ok(())
     }
 }
