@@ -994,7 +994,10 @@ impl CosmicTextSystemState {
         for glyph in runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
             let x = f32::from(glyph.position.x);
             let left = emoji_growth.partition_point(|(emoji_x, _)| *emoji_x < x);
-            if let Some((_, shift)) = left.checked_sub(1).and_then(|ix| emoji_growth.get(ix)) {
+            if let Some((_, shift)) = left
+                .checked_sub(1)
+                .and_then(|index| emoji_growth.get(index))
+            {
                 glyph.position.x += Pixels::from(*shift);
             }
         }
@@ -1490,7 +1493,8 @@ fn check_is_known_emoji_font(postscript_name: &str) -> bool {
 fn emoji_scale(font_size: Pixels) -> f32 {
     // CoreText draws Apple Color Emoji 1.25 times as large up to 16 px, and the factor
     // falls to 1 at 24 px. Noto Color Emoji's art fills about 1.1 times the em of Apple's,
-    // so 0.9 of that factor matches macOS. Large emoji keep their size.
+    // so 0.9 of that factor matches macOS. Large emoji keep their size. Other emoji fonts
+    // take the same factor as an approximation.
     let size = f32::from(font_size);
     let core_text_size = (size * 1.25).min(12. + size / 2.).max(size);
     (0.9 * core_text_size / size).max(1.)
@@ -2570,6 +2574,25 @@ mod tests {
         let body = missing_advance_per_em(16.)?;
         let large = missing_advance_per_em(32.)?;
         assert!((body - large).abs() < 0.01, "{body} != {large}");
+        Ok(())
+    }
+
+    #[test]
+    fn components_of_an_unjoined_emoji_sequence_make_room() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        let emoji_advance = f32::from(layout_at(&text_system, "😀", 16.)?.width);
+        let layout = layout_at(&text_system, "😀\u{200d}😀", 16.)?;
+        let run = layout.runs.first().context("no run")?;
+        let [first, second] = run.glyphs.as_slice() else {
+            anyhow::bail!("{} glyphs", run.glyphs.len());
+        };
+        assert_eq!(first.index, second.index);
+        let distance = f32::from(second.position.x - first.position.x);
+        assert!(
+            (distance - emoji_advance).abs() < 0.01,
+            "{distance} != {emoji_advance}"
+        );
         Ok(())
     }
 }
