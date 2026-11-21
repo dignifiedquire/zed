@@ -920,8 +920,10 @@ impl CosmicTextSystemState {
 
         let emoji_scale = emoji_scale(font_size);
         // Emoji draw larger than shaped. Each entry holds an emoji's left edge and the advance
-        // it gains.
+        // it gains, and the line's ascent and descent grow with the emoji font's.
         let mut emoji_growth: SmallVec<[(f32, f32); 4]> = SmallVec::new();
+        let mut emoji_ascent: f32 = 0.;
+        let mut emoji_descent: f32 = 0.;
         let mut runs: Vec<ShapedRun> = Vec::new();
         for glyph in &layout.glyphs {
             let mut font_id = FontId(glyph.metadata);
@@ -954,6 +956,10 @@ impl CosmicTextSystemState {
 
             if is_emoji && emoji_scale > 1. {
                 emoji_growth.push((glyph.x, glyph.w * (emoji_scale - 1.)));
+                let metrics = loaded_font.font.as_swash().metrics(&[]);
+                let units = f32::from(font_size) * emoji_scale / f32::from(metrics.units_per_em);
+                emoji_ascent = emoji_ascent.max(metrics.ascent * units);
+                emoji_descent = emoji_descent.max(metrics.descent * units);
             }
 
             let shaped_glyph = ShapedGlyph {
@@ -1002,8 +1008,8 @@ impl CosmicTextSystemState {
         LineLayout {
             font_size,
             width: (layout.w + growth).into(),
-            ascent: layout.max_ascent.into(),
-            descent: layout.max_descent.into(),
+            ascent: layout.max_ascent.max(emoji_ascent).into(),
+            descent: layout.max_descent.max(emoji_descent).into(),
             runs,
             len: text.len(),
         }
@@ -2528,6 +2534,41 @@ mod tests {
             assert!(
                 (right_x - emoji_x - emoji_advance).abs() < 0.01,
                 "{right_x} - {emoji_x} != {emoji_advance} in {positions:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn emoji_at_text_sizes_stay_inside_the_line_ascent_and_descent() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        for font_size in 12..=19 {
+            let font_size = font_size as f32;
+            let layout = layout_at(&text_system, "😀", font_size)?;
+            let run = layout.runs.first().context("no run")?;
+            let glyph = run.glyphs.first().context("no glyph")?;
+            let params = RenderGlyphParams {
+                font_id: run.font_id,
+                glyph_id: glyph.id,
+                font_size: gpui::px(font_size),
+                subpixel_variant: point(0, 0),
+                scale_factor: 1.0,
+                is_emoji: glyph.is_emoji,
+                subpixel_rendering: false,
+                dilation: 0,
+            };
+            let bounds = text_system.glyph_raster_bounds(&params)?;
+            let top = -bounds.origin.y.0 as f32;
+            let bottom = (bounds.origin.y.0 + bounds.size.height.0) as f32;
+            let (ascent, descent) = (f32::from(layout.ascent), f32::from(layout.descent));
+            assert!(
+                top <= ascent + 1.,
+                "{font_size} px: top {top} above {ascent}"
+            );
+            assert!(
+                bottom <= descent + 1.,
+                "{font_size} px: bottom {bottom} below {descent}"
             );
         }
         Ok(())
