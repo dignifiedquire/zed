@@ -1,6 +1,6 @@
 use crate::{
     ActiveTooltip, AnyView, App, Bounds, DispatchPhase, Element, ElementId, GlobalElementId,
-    HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId,
+    HighlightStyle, Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, LayoutId,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, SharedString, Size, TextOverflow,
     TextRun, TextStyle, TooltipId, TruncateFrom, WhiteSpace, Window, WrappedLine,
     WrappedLineLayout, register_tooltip_mouse_handlers, set_tooltip_on_window,
@@ -1102,6 +1102,7 @@ pub struct InteractiveTextState {
     hovered_index: Rc<Cell<Option<usize>>>,
     active_tooltip: Rc<RefCell<Option<ActiveTooltip>>>,
     long_press_tooltip_active: Rc<Cell<bool>>,
+    tooltip_hitbox: Rc<Cell<Option<HitboxId>>>,
 }
 
 /// InteractiveTest is a wrapper around StyledText that adds mouse interactions.
@@ -1340,14 +1341,15 @@ impl Element for InteractiveText {
                     });
 
                     let check_is_hovered = Rc::new({
-                        let hitbox = hitbox.clone();
+                        let tooltip_hitbox = interactive_state.tooltip_hitbox.clone();
+                        tooltip_hitbox.set(Some(hitbox.id));
                         let text_layout = text_layout.clone();
                         let pending_mouse_down = interactive_state.mouse_down_index.clone();
                         move |window: &Window| {
                             text_layout
                                 .index_for_position(window.mouse_position())
                                 .is_ok()
-                                && hitbox.is_hovered(window)
+                                && tooltip_hitbox.get().is_some_and(|id| id.is_hovered(window))
                                 && pending_mouse_down.get().is_none()
                         }
                     });
