@@ -3273,11 +3273,16 @@ impl Interactivity {
                             && source_bounds.contains(&window.mouse_position())
                     }
                 });
-                let check_is_hovered = Rc::new({
-                    let hitbox = hitbox.clone();
-                    move |window: &Window| {
-                        pending_mouse_down.borrow().is_none() && hitbox.is_hovered(window)
-                    }
+                // A pending tooltip checks this after later frames, so it
+                // reads the hitbox of the newest frame.
+                let tooltip_hitbox = element_state
+                    .tooltip_hitbox
+                    .get_or_insert_with(Default::default)
+                    .clone();
+                tooltip_hitbox.set(Some(hitbox.id));
+                let check_is_hovered = Rc::new(move |window: &Window| {
+                    pending_mouse_down.borrow().is_none()
+                        && tooltip_hitbox.get().is_some_and(|id| id.is_hovered(window))
                 });
                 register_tooltip_mouse_handlers(
                     &active_tooltip,
@@ -3685,6 +3690,7 @@ pub struct InteractiveElementState {
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
+    tooltip_hitbox: Option<Rc<Cell<Option<HitboxId>>>>,
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.
@@ -3943,6 +3949,7 @@ fn handle_tooltip_mouse_move(
             let delayed_show_task = window.spawn(cx, {
                 let weak_active_tooltip = Rc::downgrade(active_tooltip);
                 let build_tooltip = build_tooltip.clone();
+                let check_is_hovered = check_is_hovered.clone();
                 let check_is_hovered_during_prepaint = check_is_hovered_during_prepaint.clone();
                 async move |cx| {
                     cx.background_executor().timer(show_delay).await;
@@ -3950,6 +3957,12 @@ fn handle_tooltip_mouse_move(
                         return;
                     };
                     cx.update(|window, cx| {
+                        // Something drawn over the element since the hover
+                        // began, such as a modal, takes the tooltip away.
+                        if !check_is_hovered(window) {
+                            active_tooltip.borrow_mut().take();
+                            return;
+                        }
                         show_tooltip(
                             &active_tooltip,
                             &build_tooltip,
@@ -4605,6 +4618,76 @@ mod tests {
         assert_eq!(render_count.get(), initial_render_count + 2);
         assert_eq!(anonymous_paint_count.get(), 1);
         assert_eq!(stateful_width.get(), px(10.));
+    }
+
+    struct CoveredTooltipTestView {
+        is_covered: bool,
+        tooltip_builds: Rc<Cell<usize>>,
+    }
+
+    impl Render for CoveredTooltipTestView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let tooltip_builds = self.tooltip_builds.clone();
+            div()
+                .relative()
+                .size_full()
+                .child(
+                    div()
+                        .id("tooltip-target")
+                        .size(px(20.))
+                        .tooltip(move |_, cx| {
+                            tooltip_builds.set(tooltip_builds.get() + 1);
+                            cx.new(|_| crate::EmptyView).into()
+                        }),
+                )
+                .when(self.is_covered, |this| {
+                    this.child(div().id("cover").absolute().inset_0().occlude())
+                })
+        }
+    }
+
+    fn setup_hovered_tooltip_target(
+        is_covered_later: bool,
+        cx: &mut TestAppContext,
+    ) -> Rc<Cell<usize>> {
+        let tooltip_builds = Rc::new(Cell::new(0));
+        let window = cx.add_window({
+            let tooltip_builds = tooltip_builds.clone();
+            move |_, _| CoveredTooltipTestView {
+                is_covered: false,
+                tooltip_builds,
+            }
+        });
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            window.simulate_mouse_move(point(px(10.), px(10.)), cx)
+        })
+        .unwrap();
+        window
+            .update(cx, |view, _, cx| {
+                view.is_covered = is_covered_later;
+                cx.notify();
+            })
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        cx.executor()
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY + Duration::from_millis(1));
+        cx.run_until_parked();
+        tooltip_builds
+    }
+
+    #[gpui::test]
+    fn pending_tooltip_stays_hidden_once_its_element_is_covered(cx: &mut TestAppContext) {
+        let tooltip_builds = setup_hovered_tooltip_target(true, cx);
+        assert_eq!(tooltip_builds.get(), 0);
+    }
+
+    #[gpui::test]
+    fn pending_tooltip_shows_after_its_element_is_drawn_again(cx: &mut TestAppContext) {
+        let tooltip_builds = setup_hovered_tooltip_target(false, cx);
+        assert_eq!(tooltip_builds.get(), 1);
     }
 
     struct HoverListenerLayoutTestView {
