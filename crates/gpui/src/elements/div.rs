@@ -3273,17 +3273,17 @@ impl Interactivity {
                             && source_bounds.contains(&window.mouse_position())
                     }
                 });
-                // A pending tooltip checks this after later frames, so it
-                // reads the hitbox of the newest frame.
-                let tooltip_hitbox = element_state
-                    .tooltip_hitbox
-                    .get_or_insert_with(Default::default)
-                    .clone();
-                tooltip_hitbox.set(Some(hitbox.id));
-                let check_is_hovered = Rc::new(move |window: &Window| {
-                    pending_mouse_down.borrow().is_none()
-                        && tooltip_hitbox.get().is_some_and(|id| id.is_hovered(window))
-                });
+                let check_is_hovered = newest_hover_check(
+                    element_state
+                        .tooltip_hover_check
+                        .get_or_insert_with(Default::default),
+                    Rc::new({
+                        let hitbox = hitbox.clone();
+                        move |window: &Window| {
+                            pending_mouse_down.borrow().is_none() && hitbox.is_hovered(window)
+                        }
+                    }),
+                );
                 register_tooltip_mouse_handlers(
                     &active_tooltip,
                     self.tooltip_id,
@@ -3690,7 +3690,21 @@ pub struct InteractiveElementState {
     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
     long_press_tooltip_active: Option<Rc<Cell<bool>>>,
-    tooltip_hitbox: Option<Rc<Cell<Option<HitboxId>>>>,
+    tooltip_hover_check: Option<NewestHoverCheck>,
+}
+
+/// The hover check of the frame drawn last, for a tooltip pending across frames.
+pub(crate) type NewestHoverCheck = Rc<RefCell<Option<Rc<dyn Fn(&Window) -> bool>>>>;
+
+/// Stores `check` as the newest in `newest`, and returns a check that runs
+/// whichever check is newest when it is called.
+pub(crate) fn newest_hover_check(
+    newest: &NewestHoverCheck,
+    check: Rc<dyn Fn(&Window) -> bool>,
+) -> Rc<dyn Fn(&Window) -> bool> {
+    newest.replace(Some(check));
+    let newest = newest.clone();
+    Rc::new(move |window: &Window| newest.borrow().as_ref().is_some_and(|check| check(window)))
 }
 
 /// Whether or not the element or a group that contains it is clicked by the mouse.
@@ -3957,20 +3971,25 @@ fn handle_tooltip_mouse_move(
                         return;
                     };
                     cx.update(|window, cx| {
-                        // Something drawn over the element since the hover
-                        // began, such as a modal, takes the tooltip away.
-                        if !check_is_hovered(window) {
-                            active_tooltip.borrow_mut().take();
-                            return;
+                        let show = move |window: &mut Window, cx: &mut App| {
+                            show_tooltip_if_hovered(
+                                &active_tooltip,
+                                &build_tooltip,
+                                &check_is_hovered,
+                                &check_is_hovered_during_prepaint,
+                                window,
+                                cx,
+                            );
+                        };
+                        // A frame not drawn yet, such as one opening a modal,
+                        // may cover the element. Next-frame callbacks run
+                        // before their frame draws, so the check waits for the
+                        // one after it.
+                        if window.invalidator.is_dirty() {
+                            window.on_next_frame(|window, _| window.on_next_frame(show));
+                        } else {
+                            show(window, cx);
                         }
-                        show_tooltip(
-                            &active_tooltip,
-                            &build_tooltip,
-                            &check_is_hovered_during_prepaint,
-                            None,
-                            window,
-                            cx,
-                        );
                     })
                     .ok();
                 }
@@ -3983,6 +4002,37 @@ fn handle_tooltip_mouse_move(
         }
         Action::CheckVisible => cx.notify(current_view),
     }
+}
+
+/// Shows the pending tooltip if its element is still hovered in the frame
+/// drawn last, and drops it otherwise.
+fn show_tooltip_if_hovered(
+    active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+    build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
+    check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
+    check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let is_pending = matches!(
+        active_tooltip.borrow().as_ref(),
+        Some(ActiveTooltip::WaitingForShow { .. })
+    );
+    if !is_pending {
+        return;
+    }
+    if !check_is_hovered(window) {
+        active_tooltip.borrow_mut().take();
+        return;
+    }
+    show_tooltip(
+        active_tooltip,
+        build_tooltip,
+        check_is_hovered_during_prepaint,
+        None,
+        window,
+        cx,
+    );
 }
 
 fn show_tooltip(
@@ -4517,7 +4567,8 @@ mod tests {
     use super::*;
     use crate::{
         AnyWindowHandle, AppContext as _, Context, GestureTuning, InputEvent, Keystroke,
-        MouseMoveEvent, TestAppContext, TouchEvent, TouchId, canvas, util::FluentBuilder as _,
+        MouseMoveEvent, TestAppContext, TouchEvent, TouchId, WindowHandle, canvas,
+        util::FluentBuilder as _,
     };
     use std::{cell::Cell, rc::Weak};
 
@@ -4621,6 +4672,7 @@ mod tests {
     }
 
     struct CoveredTooltipTestView {
+        is_text: bool,
         is_covered: bool,
         tooltip_builds: Rc<Cell<usize>>,
     }
@@ -4628,40 +4680,57 @@ mod tests {
     impl Render for CoveredTooltipTestView {
         fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             let tooltip_builds = self.tooltip_builds.clone();
+            let build = move |cx: &mut App| -> AnyView {
+                tooltip_builds.set(tooltip_builds.get() + 1);
+                cx.new(|_| crate::EmptyView).into()
+            };
+            let target = if self.is_text {
+                crate::InteractiveText::new(
+                    "tooltip-target",
+                    crate::StyledText::new("A target long enough to lie under the pointer"),
+                )
+                .tooltip(move |_, _, cx| Some(build(cx)))
+                .into_any_element()
+            } else {
+                div()
+                    .id("tooltip-target")
+                    .size(px(20.))
+                    .tooltip(move |_, cx| build(cx))
+                    .into_any_element()
+            };
             div()
                 .relative()
                 .size_full()
-                .child(
-                    div()
-                        .id("tooltip-target")
-                        .size(px(20.))
-                        .tooltip(move |_, cx| {
-                            tooltip_builds.set(tooltip_builds.get() + 1);
-                            cx.new(|_| crate::EmptyView).into()
-                        }),
-                )
+                .child(target)
                 .when(self.is_covered, |this| {
                     this.child(div().id("cover").absolute().inset_0().occlude())
                 })
         }
     }
 
-    fn setup_hovered_tooltip_target(
-        is_covered_later: bool,
+    fn setup_tooltip_target(
+        is_text: bool,
         cx: &mut TestAppContext,
-    ) -> Rc<Cell<usize>> {
+    ) -> (WindowHandle<CoveredTooltipTestView>, Rc<Cell<usize>>) {
         let tooltip_builds = Rc::new(Cell::new(0));
         let window = cx.add_window({
             let tooltip_builds = tooltip_builds.clone();
             move |_, _| CoveredTooltipTestView {
+                is_text,
                 is_covered: false,
                 tooltip_builds,
             }
         });
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
-            .unwrap();
+        (window, tooltip_builds)
+    }
+
+    fn hover_then_draw_again(
+        window: WindowHandle<CoveredTooltipTestView>,
+        is_covered_later: bool,
+        cx: &mut TestAppContext,
+    ) {
         cx.update_window(window.into(), |_, window, cx| {
-            window.simulate_mouse_move(point(px(10.), px(10.)), cx)
+            window.simulate_mouse_move(point(px(10.), px(8.)), cx)
         })
         .unwrap();
         window
@@ -4670,6 +4739,17 @@ mod tests {
                 cx.notify();
             })
             .unwrap();
+    }
+
+    fn setup_hovered_tooltip_target(
+        is_text: bool,
+        is_covered_later: bool,
+        cx: &mut TestAppContext,
+    ) -> Rc<Cell<usize>> {
+        let (window, tooltip_builds) = setup_tooltip_target(is_text, cx);
+        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
+            .unwrap();
+        hover_then_draw_again(window, is_covered_later, cx);
         cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear(cx))
             .unwrap();
         cx.executor()
@@ -4678,15 +4758,69 @@ mod tests {
         tooltip_builds
     }
 
+    fn setup_tooltip_pending_over_an_undrawn_frame(
+        is_covered_later: bool,
+        cx: &mut TestAppContext,
+    ) -> Rc<Cell<usize>> {
+        cx.app.borrow_mut().mode = crate::app::GpuiMode::Production;
+        let (window, tooltip_builds) = setup_tooltip_target(false, cx);
+        let platform_window = cx.test_window(window.into());
+        let draw_frame = |cx: &mut TestAppContext| {
+            cx.executor().advance_clock(Duration::from_millis(100));
+            platform_window.simulate_frame_request(crate::RequestFrameOptions {
+                require_presentation: true,
+                ..Default::default()
+            });
+            cx.run_until_parked();
+        };
+        draw_frame(cx);
+        hover_then_draw_again(window, is_covered_later, cx);
+        cx.executor()
+            .advance_clock(DEFAULT_TOOLTIP_SHOW_DELAY + Duration::from_millis(1));
+        cx.run_until_parked();
+        for _ in 0..3 {
+            draw_frame(cx);
+        }
+        tooltip_builds
+    }
+
     #[gpui::test]
     fn pending_tooltip_stays_hidden_once_its_element_is_covered(cx: &mut TestAppContext) {
-        let tooltip_builds = setup_hovered_tooltip_target(true, cx);
+        let tooltip_builds = setup_hovered_tooltip_target(false, true, cx);
         assert_eq!(tooltip_builds.get(), 0);
     }
 
     #[gpui::test]
     fn pending_tooltip_shows_after_its_element_is_drawn_again(cx: &mut TestAppContext) {
-        let tooltip_builds = setup_hovered_tooltip_target(false, cx);
+        let tooltip_builds = setup_hovered_tooltip_target(false, false, cx);
+        assert_eq!(tooltip_builds.get(), 1);
+    }
+
+    #[gpui::test]
+    fn pending_text_tooltip_stays_hidden_once_its_text_is_covered(cx: &mut TestAppContext) {
+        let tooltip_builds = setup_hovered_tooltip_target(true, true, cx);
+        assert_eq!(tooltip_builds.get(), 0);
+    }
+
+    #[gpui::test]
+    fn pending_text_tooltip_shows_after_its_text_is_drawn_again(cx: &mut TestAppContext) {
+        let tooltip_builds = setup_hovered_tooltip_target(true, false, cx);
+        assert_eq!(tooltip_builds.get(), 1);
+    }
+
+    #[gpui::test]
+    fn pending_tooltip_stays_hidden_once_a_frame_not_drawn_yet_covers_its_element(
+        cx: &mut TestAppContext,
+    ) {
+        let tooltip_builds = setup_tooltip_pending_over_an_undrawn_frame(true, cx);
+        assert_eq!(tooltip_builds.get(), 0);
+    }
+
+    #[gpui::test]
+    fn pending_tooltip_shows_after_a_frame_not_drawn_yet_leaves_its_element_uncovered(
+        cx: &mut TestAppContext,
+    ) {
+        let tooltip_builds = setup_tooltip_pending_over_an_undrawn_frame(false, cx);
         assert_eq!(tooltip_builds.get(), 1);
     }
 
