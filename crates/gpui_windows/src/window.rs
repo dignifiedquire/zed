@@ -1020,6 +1020,11 @@ impl PlatformWindow for WindowsWindow {
         self.state.callbacks.should_close.set(Some(callback));
     }
 
+    #[cfg(feature = "test-support")]
+    fn take_should_close(&self) -> Option<Box<dyn FnMut() -> bool>> {
+        self.state.callbacks.should_close.take()
+    }
+
     fn on_close(&self, callback: Box<dyn FnOnce()>) {
         self.state.callbacks.close.set(Some(callback));
     }
