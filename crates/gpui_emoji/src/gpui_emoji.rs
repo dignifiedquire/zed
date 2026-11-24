@@ -8,7 +8,9 @@ use smallvec::SmallVec;
 use unicode_properties::{EmojiStatus, UnicodeEmoji as _};
 use unicode_segmentation::UnicodeSegmentation as _;
 
-pub use crate::color_glyph::{ColorImage, color_glyph_bounds, has_color_glyph, paint_color_glyph};
+pub use crate::color_glyph::{
+    ColorImage, color_glyph_bounds, colrv1_family, has_color_glyph, paint_color_glyph,
+};
 
 /// How a grapheme cluster asks to be drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
