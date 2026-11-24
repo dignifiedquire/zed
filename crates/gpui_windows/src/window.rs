@@ -1085,6 +1085,10 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {
+        // No screen reader asks a test window for its tree, so readers inside the process turn
+        // it on at once.
+        #[cfg(feature = "test-support")]
+        (callbacks.activation)();
         let action_handler = A11yActionHandler(callbacks.action);
         let is_focused = unsafe { GetForegroundWindow() } == self.0.hwnd;
 
