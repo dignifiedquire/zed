@@ -627,6 +627,9 @@ impl DirectWriteState {
                 runs: &mut runs,
                 layout: &text_layout,
                 width: 0.0,
+                emoji_growth: SmallVec::new(),
+                emoji_ascent: 0.0,
+                emoji_descent: 0.0,
             };
             text_layout.Draw(
                 Some((&raw mut renderer_context).cast::<c_void>().cast_const()),
@@ -634,13 +637,37 @@ impl DirectWriteState {
                 0.0,
                 0.0,
             )?;
-            let width = px(renderer_context.width);
+            let RendererContext {
+                width,
+                mut emoji_growth,
+                emoji_ascent,
+                emoji_descent,
+                ..
+            } = renderer_context;
+            // Every glyph moves right by the advance the emoji left of it gain. A right-to-left
+            // line lists its glyphs from the right, so the emoji are sorted by position first.
+            emoji_growth.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let mut growth = 0.;
+            for (_, added) in &mut emoji_growth {
+                growth += *added;
+                *added = growth;
+            }
+            for glyph in runs.iter_mut().flat_map(|run| run.glyphs.iter_mut()) {
+                let x = glyph.position.x.as_f32();
+                let left = emoji_growth.partition_point(|(emoji_x, _)| *emoji_x < x);
+                if let Some((_, shift)) = left
+                    .checked_sub(1)
+                    .and_then(|index| emoji_growth.get(index))
+                {
+                    glyph.position.x += px(*shift);
+                }
+            }
 
             Ok(LineLayout {
                 font_size,
-                width,
-                ascent,
-                descent,
+                width: px(width + growth),
+                ascent: ascent.max(px(emoji_ascent)),
+                descent: descent.max(px(emoji_descent)),
                 runs,
                 len: text.len(),
             })
@@ -740,7 +767,7 @@ impl DirectWriteState {
         let offset = [DWRITE_GLYPH_OFFSET::default()];
         let glyph_run = DWRITE_GLYPH_RUN {
             fontFace: ManuallyDrop::new(Some(unsafe { std::ptr::read(&***font.font_face) })),
-            fontEmSize: params.font_size.as_f32() * params.scale_factor,
+            fontEmSize: params.font_size.as_f32() * params.scale_factor * glyph_scale(params),
             glyphCount: 1,
             glyphIndices: glyph_id.as_ptr(),
             glyphAdvances: advance.as_ptr(),
@@ -1292,6 +1319,11 @@ struct RendererContext<'t, 'a, 'b> {
     runs: &'b mut Vec<ShapedRun>,
     layout: &'b IDWriteTextLayout,
     width: f32,
+    /// The left edge of each enlarged emoji and the advance it gains.
+    emoji_growth: SmallVec<[(f32, f32); 4]>,
+    /// The ascent and descent of the emoji font at the enlarged size.
+    emoji_ascent: f32,
+    emoji_descent: f32,
 }
 
 #[derive(Debug)]
@@ -1520,6 +1552,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 )?
             };
 
+            let emoji_scale = gpui_emoji::emoji_scale(glyphrun.fontEmSize);
             let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
             let mut utf16_idx = desc.textPosition as usize;
             let mut glyph_idx = 0;
@@ -1536,6 +1569,24 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     let is_emoji =
                         color_font && is_color_glyph(font_face, id, &context.components.factory);
                     let this_glyph_idx = glyph_idx + cluster_glyph_idx;
+                    // Emoji draw larger than shaped, and the font's missing glyph keeps its
+                    // size.
+                    if is_emoji && id.0 != 0 && emoji_scale > 1. {
+                        context.emoji_growth.push((
+                            context.width + glyph_offsets[this_glyph_idx].advanceOffset,
+                            glyph_advances[this_glyph_idx] * (emoji_scale - 1.),
+                        ));
+                        let mut metrics = DWRITE_FONT_METRICS1::default();
+                        unsafe { font_face.GetMetrics(&mut metrics) };
+                        let units = glyphrun.fontEmSize * emoji_scale
+                            / f32::from(metrics.Base.designUnitsPerEm);
+                        context.emoji_ascent = context
+                            .emoji_ascent
+                            .max(f32::from(metrics.Base.ascent) * units);
+                        context.emoji_descent = context
+                            .emoji_descent
+                            .max(f32::from(metrics.Base.descent) * units);
+                    }
                     glyphs.push(ShapedGlyph {
                         id,
                         position: point(
@@ -1891,6 +1942,16 @@ fn is_color_glyph(
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 
+/// Returns the factor a glyph draws larger than its font size: the emoji factor for an emoji,
+/// except the font's missing glyph.
+fn glyph_scale(params: &RenderGlyphParams) -> f32 {
+    if params.is_emoji && params.glyph_id.0 != 0 {
+        gpui_emoji::emoji_scale(params.font_size.as_f32())
+    } else {
+        1.
+    }
+}
+
 fn is_line_separator(character: char) -> bool {
     matches!(character, '\u{2028}' | '\u{2029}')
 }
@@ -1899,10 +1960,10 @@ fn is_line_separator(character: char) -> bool {
 mod tests {
     use super::DirectWriteTextSystem;
     use crate::direct_write::ClusterAnalyzer;
-    use anyhow::Result;
+    use anyhow::{Context as _, Result};
     use gpui::{
-        Font, FontId, FontRun, FontWeight, PlatformTextSystem, TextRun, TextSystem,
-        WindowTextSystem, px,
+        Font, FontId, FontRun, FontWeight, PlatformTextSystem, RenderGlyphParams, TextRun,
+        TextSystem, WindowTextSystem, point, px,
     };
     use std::sync::Arc;
     use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_STRETCH_NORMAL, DWRITE_TEXT_METRICS};
@@ -2106,6 +2167,123 @@ mod tests {
         assert_eq!(
             glyph_fonts(&text_system, segoe_ui, "a1\u{fe0f}\u{20e3}b"),
             [text.clone(), emoji, text]
+        );
+        Ok(())
+    }
+
+    fn layout_in(
+        text_system: &DirectWriteTextSystem,
+        font_id: FontId,
+        text: &str,
+        font_size: f32,
+    ) -> gpui::LineLayout {
+        let runs = [FontRun {
+            len: text.len(),
+            font_id,
+        }];
+        text_system.layout_line(text, px(font_size), &runs)
+    }
+
+    fn emoji_params(
+        font_id: FontId,
+        glyph: &gpui::ShapedGlyph,
+        font_size: f32,
+    ) -> RenderGlyphParams {
+        RenderGlyphParams {
+            font_id,
+            glyph_id: glyph.id,
+            font_size: px(font_size),
+            subpixel_variant: point(0, 0),
+            scale_factor: 1.0,
+            is_emoji: glyph.is_emoji,
+            subpixel_rendering: false,
+            dilation: 0,
+        }
+    }
+
+    /// Returns an emoji's advance and drawn height per em at `font_size`.
+    fn emoji_advance_and_height_per_em(
+        text_system: &DirectWriteTextSystem,
+        font_id: FontId,
+        font_size: f32,
+    ) -> Result<(f32, f32)> {
+        let layout = layout_in(text_system, font_id, "\u{1f600}\u{1f600}", font_size);
+        let run = layout.runs.first().context("no run")?;
+        let [first, second] = run.glyphs.as_slice() else {
+            anyhow::bail!("{} glyphs", run.glyphs.len());
+        };
+        let params = emoji_params(run.font_id, first, font_size);
+        let height = text_system.glyph_raster_bounds(&params)?.size.height.0 as f32;
+        let advance = (second.position.x - first.position.x).as_f32();
+        Ok((advance / font_size, height / font_size))
+    }
+
+    #[test]
+    fn emoji_at_text_sizes_draw_and_advance_larger_than_large_emoji() -> Result<()> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        let (body_advance, body_height) =
+            emoji_advance_and_height_per_em(&text_system, segoe_ui, 16.)?;
+        let (large_advance, large_height) =
+            emoji_advance_and_height_per_em(&text_system, segoe_ui, 32.)?;
+        let (larger_advance, larger_height) =
+            emoji_advance_and_height_per_em(&text_system, segoe_ui, 64.)?;
+        assert!(
+            body_height > large_height * 1.1,
+            "{body_height} <= {large_height} * 1.1"
+        );
+        assert!(
+            body_advance > large_advance * 1.1,
+            "{body_advance} <= {large_advance} * 1.1"
+        );
+        assert!(
+            (larger_height - large_height).abs() < 0.05,
+            "{larger_height} != {large_height}"
+        );
+        assert!(
+            (larger_advance - large_advance).abs() < 0.01,
+            "{larger_advance} != {large_advance}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn emoji_at_text_sizes_stay_inside_the_line_ascent_and_descent() -> Result<()> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        for font_size in 12..=19 {
+            let font_size = font_size as f32;
+            let layout = layout_in(&text_system, segoe_ui, "\u{1f600}", font_size);
+            let run = layout.runs.first().context("no run")?;
+            let glyph = run.glyphs.first().context("no glyph")?;
+            let bounds =
+                text_system.glyph_raster_bounds(&emoji_params(run.font_id, glyph, font_size))?;
+            let top = -bounds.origin.y.0 as f32;
+            let bottom = (bounds.origin.y.0 + bounds.size.height.0) as f32;
+            let (ascent, descent) = (layout.ascent.as_f32(), layout.descent.as_f32());
+            assert!(
+                top <= ascent + 1.,
+                "{font_size} px: top {top} above {ascent}"
+            );
+            assert!(
+                bottom <= descent + 1.,
+                "{font_size} px: bottom {bottom} below {descent}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn text_right_of_an_emoji_makes_room_for_it() -> Result<()> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        let emoji_advance = layout_in(&text_system, segoe_ui, "\u{1f600}", 16.).width;
+        let layout = layout_in(&text_system, segoe_ui, "\u{1f600}a", 16.);
+        let glyphs: Vec<_> = layout.runs.iter().flat_map(|run| &run.glyphs).collect();
+        let [emoji, letter] = glyphs.as_slice() else {
+            anyhow::bail!("{} glyphs", glyphs.len());
+        };
+        let distance = letter.position.x - emoji.position.x;
+        assert!(
+            (distance - emoji_advance).abs() < px(0.01),
+            "{distance:?} != {emoji_advance:?}"
         );
         Ok(())
     }

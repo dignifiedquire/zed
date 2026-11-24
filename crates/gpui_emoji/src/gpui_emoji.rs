@@ -54,6 +54,16 @@ fn is_text_default_emoji(character: char) -> bool {
         )
 }
 
+/// Returns the factor emoji grow by at a font size in pixels.
+pub fn emoji_scale(font_size: f32) -> f32 {
+    // CoreText draws Apple Color Emoji 1.25 times as large up to 16 px, and the factor
+    // falls to 1 at 24 px. Noto Color Emoji's art fills about 1.1 times the em of Apple's,
+    // so 0.9 of that factor matches macOS. Large emoji keep their size. Other emoji fonts
+    // take the same factor as an approximation.
+    let core_text_size = (font_size * 1.25).min(12. + font_size / 2.).max(font_size);
+    (0.9 * core_text_size / font_size).max(1.)
+}
+
 /// Returns the byte ranges of the grapheme clusters in `text[run]` that the
 /// emoji font draws.
 pub fn emoji_presentation_clusters(
@@ -91,6 +101,17 @@ pub fn emoji_presentation_clusters(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_grow_at_text_sizes_and_keep_large_sizes() {
+        for font_size in [12., 14., 16.] {
+            assert!((emoji_scale(font_size) - 1.125).abs() < 1e-6, "{font_size}");
+        }
+        assert!(emoji_scale(18.) > 1. && emoji_scale(18.) < 1.125);
+        for font_size in [20., 24., 32., 64.] {
+            assert_eq!(emoji_scale(font_size), 1., "{font_size}");
+        }
+    }
 
     #[test]
     fn emoji_presentation_follows_selectors() {
