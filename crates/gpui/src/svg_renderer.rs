@@ -323,32 +323,76 @@ fn load_bundled_fonts(asset_source: &dyn AssetSource, db: &mut usvg::fontdb::Dat
 // fontdb defaults generic families to Microsoft fonts ("Arial", "Times New Roman")
 // which aren't installed on most Linux systems. fontconfig normally overrides these,
 // but when it fails the defaults remain and all generic family queries return None.
+// fontdb may also name a family fontconfig lists but which isn't installed. An app
+// without the bundled fonts then takes the first installed fallback below.
 fn fix_generic_font_families(db: &mut usvg::fontdb::Database) {
     use usvg::fontdb::{Family, Query};
 
-    let families_and_fallbacks: &[(Family<'_>, &str)] = &[
-        (Family::SansSerif, "IBM Plex Sans"),
-        // No serif font bundled; use sans-serif as best available fallback.
-        (Family::Serif, "IBM Plex Sans"),
-        (Family::Monospace, "Lilex"),
-        (Family::Cursive, "IBM Plex Sans"),
-        (Family::Fantasy, "IBM Plex Sans"),
+    const SANS_SERIF: &[&str] = &[
+        "IBM Plex Sans",
+        "Noto Sans",
+        "DejaVu Sans",
+        "Liberation Sans",
+        "Arial",
+        "Helvetica",
+    ];
+    let families_and_fallbacks: &[(Family<'_>, &[&str])] = &[
+        (Family::SansSerif, SANS_SERIF),
+        // No serif font is bundled, so the bundled sans-serif comes before installed serifs.
+        (
+            Family::Serif,
+            &[
+                "IBM Plex Sans",
+                "Noto Serif",
+                "DejaVu Serif",
+                "Liberation Serif",
+                "Times New Roman",
+            ],
+        ),
+        (
+            Family::Monospace,
+            &[
+                "Lilex",
+                "Noto Sans Mono",
+                "DejaVu Sans Mono",
+                "Liberation Mono",
+                "Menlo",
+                "Courier New",
+            ],
+        ),
+        (Family::Cursive, SANS_SERIF),
+        (Family::Fantasy, SANS_SERIF),
     ];
 
-    for (family, fallback_name) in families_and_fallbacks {
+    for (family, fallback_names) in families_and_fallbacks {
         let query = Query {
             families: &[*family],
             ..Default::default()
         };
-        if db.query(&query).is_none() {
-            match family {
-                Family::SansSerif => db.set_sans_serif_family(*fallback_name),
-                Family::Serif => db.set_serif_family(*fallback_name),
-                Family::Monospace => db.set_monospace_family(*fallback_name),
-                Family::Cursive => db.set_cursive_family(*fallback_name),
-                Family::Fantasy => db.set_fantasy_family(*fallback_name),
-                _ => {}
-            }
+        if db.query(&query).is_some() {
+            continue;
+        }
+        let is_installed = |name: &&&str| {
+            db.query(&Query {
+                families: &[Family::Name(name)],
+                ..Default::default()
+            })
+            .is_some()
+        };
+        let Some(fallback_name) = fallback_names
+            .iter()
+            .find(is_installed)
+            .or(fallback_names.first())
+        else {
+            continue;
+        };
+        match family {
+            Family::SansSerif => db.set_sans_serif_family(*fallback_name),
+            Family::Serif => db.set_serif_family(*fallback_name),
+            Family::Monospace => db.set_monospace_family(*fallback_name),
+            Family::Cursive => db.set_cursive_family(*fallback_name),
+            Family::Fantasy => db.set_fantasy_family(*fallback_name),
+            _ => {}
         }
     }
 }
@@ -361,6 +405,8 @@ mod tests {
     const IBM_PLEX_REGULAR: &[u8] =
         include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf");
     const LILEX_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/lilex/Lilex-Regular.ttf");
+    const DEJAVU_SANS_SUBSET: &[u8] =
+        include_bytes!("../../gpui_wgpu/test_data/dejavu-sans/DejaVuSans-Subset.ttf");
 
     #[test]
     fn renders_parsed_svg_at_requested_size() -> Result<()> {
@@ -451,6 +497,23 @@ mod tests {
                 s
             );
         }
+    }
+
+    #[test]
+    fn sans_serif_takes_an_installed_family_without_the_bundled_fonts() {
+        let mut db = Database::new();
+        db.load_font_data(LILEX_REGULAR.to_vec());
+        db.load_font_data(DEJAVU_SANS_SUBSET.to_vec());
+        fix_generic_font_families(&mut db);
+
+        let id = db
+            .query(&Query {
+                families: &[Family::SansSerif],
+                ..Default::default()
+            })
+            .expect("sans-serif should resolve to an installed face");
+        let face = db.face(id).expect("the resolved face should exist");
+        assert_eq!(face.families[0].0, "DejaVu Sans");
     }
 
     #[test]
