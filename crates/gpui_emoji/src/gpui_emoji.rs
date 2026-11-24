@@ -1,10 +1,14 @@
 //! Emoji rules that GPUI's text systems share.
 
+mod color_glyph;
+
 use std::ops::Range;
 
 use smallvec::SmallVec;
 use unicode_properties::{EmojiStatus, UnicodeEmoji as _};
 use unicode_segmentation::UnicodeSegmentation as _;
+
+pub use crate::color_glyph::{ColorImage, color_glyph_bounds, has_color_glyph, paint_color_glyph};
 
 /// How a grapheme cluster asks to be drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
