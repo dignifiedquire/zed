@@ -1,8 +1,12 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use anyhow::Context as _;
 use etagere::BucketedAtlasAllocator;
 use parking_lot::Mutex;
 use windows::Win32::Graphics::{
     Direct3D11::{
-        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_CPU_ACCESS_WRITE, D3D11_MAP_WRITE,
+        D3D11_MAPPED_SUBRESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
         ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
     },
     Dxgi::Common::*,
@@ -12,6 +16,9 @@ use gpui::{
     AtlasBackend, AtlasKey, AtlasState, AtlasTextureId, AtlasTextureKind, AtlasTextureList,
     AtlasTile, Bounds, DevicePixels, PlatformAtlas, Point, Size,
 };
+
+/// Whether a staging upload failed and was logged.
+static STAGING_FAILED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct DirectXAtlas(Mutex<AtlasState<DirectXAtlasTextures>>);
 
@@ -101,7 +108,7 @@ impl AtlasBackend for DirectXAtlasTextures {
         let texture = self
             .texture(tile.texture_id)
             .ok_or_else(|| anyhow::anyhow!("allocated tile refers to a missing texture"))?;
-        texture.upload(&self.device_context, tile.bounds, bytes);
+        texture.upload(&self.device, &self.device_context, tile.bounds, bytes);
         Ok(tile)
     }
 
@@ -278,6 +285,7 @@ impl DirectXAtlasTexture {
 
     fn upload(
         &self,
+        device: &ID3D11Device,
         device_context: &ID3D11DeviceContext,
         bounds: Bounds<DevicePixels>,
         bytes: &[u8],
@@ -300,6 +308,18 @@ impl DirectXAtlasTexture {
             );
             return;
         }
+        // A driver may keep the memory `UpdateSubresource` stages a copy in for the life of the
+        // process. Parallels' kept chunks of about 32 MiB, and a scroll through the emoji picker
+        // grew the app by 200 MiB. A fresh staging texture keeps the copy in order and never
+        // waits to be mapped.
+        match self.upload_through_staging(device, device_context, bounds, bytes, row_bytes) {
+            Ok(()) => return,
+            // A device that never stages would otherwise log every tile.
+            Err(error) if !STAGING_FAILED.swap(true, Ordering::Relaxed) => {
+                log::error!("DirectXAtlasTexture::upload: staging failed: {error:#}");
+            }
+            Err(_) => {}
+        }
         unsafe {
             device_context.UpdateSubresource(
                 &self.texture,
@@ -317,6 +337,62 @@ impl DirectXAtlasTexture {
                 0,
             );
         }
+    }
+
+    fn upload_through_staging(
+        &self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        bounds: Bounds<DevicePixels>,
+        bytes: &[u8],
+        row_bytes: usize,
+    ) -> anyhow::Result<()> {
+        if row_bytes == 0 || bounds.size.height.0 <= 0 {
+            return Ok(());
+        }
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { self.texture.GetDesc(&mut desc) };
+        desc.Width = bounds.size.width.0 as u32;
+        desc.Height = bounds.size.height.0 as u32;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE.0 as u32;
+        desc.MiscFlags = 0;
+        let mut staging = None;
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging))? };
+        let staging = staging.context("no staging texture")?;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { device_context.Map(&staging, 0, D3D11_MAP_WRITE, 0, Some(&mut mapped))? };
+        for (row, source) in bytes
+            .chunks_exact(row_bytes)
+            .take(desc.Height as usize)
+            .enumerate()
+        {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    source.as_ptr(),
+                    mapped
+                        .pData
+                        .cast::<u8>()
+                        .add(row * mapped.RowPitch as usize),
+                    row_bytes,
+                );
+            }
+        }
+        unsafe {
+            device_context.Unmap(&staging, 0);
+            device_context.CopySubresourceRegion(
+                &self.texture,
+                0,
+                bounds.left().0 as u32,
+                bounds.top().0 as u32,
+                0,
+                &staging,
+                0,
+                None,
+            );
+        }
+        Ok(())
     }
 
     fn decrement_ref_count(&mut self) {
