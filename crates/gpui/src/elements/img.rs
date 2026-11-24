@@ -17,7 +17,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use thiserror::Error;
@@ -206,11 +206,27 @@ pub fn img(source: impl Into<ImageSource>) -> Img {
 impl Img {
     /// A list of all format extensions currently supported by this img element
     pub fn extensions() -> &'static [&'static str] {
-        // This is the list in [image::ImageFormat::from_extension] + `svg`
-        &[
-            "avif", "jpg", "jpeg", "png", "gif", "webp", "tif", "tiff", "tga", "dds", "bmp", "ico",
-            "hdr", "exr", "pbm", "pam", "ppm", "pgm", "ff", "farbfeld", "qoi", "svg",
-        ]
+        // The formats `image` decodes in this build, plus `svg`.
+        static EXTENSIONS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+            let optional = [
+                (cfg!(feature = "image-tga"), &["tga"][..]),
+                (cfg!(feature = "image-hdr"), &["hdr"]),
+                (cfg!(feature = "image-exr"), &["exr"]),
+                (cfg!(feature = "image-farbfeld"), &["ff"]),
+                (cfg!(feature = "image-qoi"), &["qoi"]),
+            ];
+            let mut extensions = vec![
+                "jpg", "jpeg", "png", "gif", "webp", "tif", "tiff", "bmp", "ico", "pbm", "pam",
+                "ppm", "pgm", "svg",
+            ];
+            for (is_enabled, names) in optional {
+                if is_enabled {
+                    extensions.extend_from_slice(names);
+                }
+            }
+            extensions
+        });
+        &EXTENSIONS
     }
 
     /// Sets the image cache for the current node.
@@ -733,6 +749,27 @@ mod tests {
     use smallvec::SmallVec;
 
     const TEST_IMG_ID: &str = "test-img";
+
+    #[test]
+    fn extensions_name_exactly_the_formats_this_build_decodes() {
+        let listed = Img::extensions();
+        for extension in listed.iter().filter(|extension| **extension != "svg") {
+            let format = image::ImageFormat::from_extension(extension);
+            assert!(
+                format.is_some_and(|format| format.reading_enabled()),
+                "{extension} is listed but does not decode"
+            );
+        }
+        for (extension, is_enabled) in [
+            ("exr", cfg!(feature = "image-exr")),
+            ("hdr", cfg!(feature = "image-hdr")),
+            ("tga", cfg!(feature = "image-tga")),
+            ("qoi", cfg!(feature = "image-qoi")),
+            ("ff", cfg!(feature = "image-farbfeld")),
+        ] {
+            assert_eq!(listed.contains(&extension), is_enabled, "{extension}");
+        }
+    }
 
     fn test_image(frame_count: usize) -> Arc<RenderImage> {
         let frame = Frame::new(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 0])));

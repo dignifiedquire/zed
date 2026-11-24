@@ -666,18 +666,11 @@ ignore = "0.4.22"
 # decoding AVIF would additionally need the non-default "avif-native" feature.
 image = { version = "0.25.1", default-features = false, features = [
     "bmp",
-    "dds",
-    "exr",
-    "ff",
     "gif",
-    "hdr",
     "ico",
     "jpeg",
     "png",
     "pnm",
-    "qoi",
-    "rayon",
-    "tga",
     "tiff",
     "webp",
 ] }

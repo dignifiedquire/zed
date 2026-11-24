@@ -46,6 +46,22 @@ screen-capture = [
 ]
 windows-manifest = ["dep:embed-resource"]
 profiler = ["dep:hdrhistogram"]
+# Image formats beyond the common ones, which the workspace leaves out of
+# `image` to keep binaries small.
+image-exr = ["image/exr"]
+image-farbfeld = ["image/ff"]
+image-hdr = ["image/hdr"]
+image-qoi = ["image/qoi"]
+image-tga = ["image/tga"]
+image-rayon = ["image/rayon"]
+all-image-formats = [
+    "image-exr",
+    "image-farbfeld",
+    "image-hdr",
+    "image-qoi",
+    "image-tga",
+    "image-rayon",
+]
 stacker = ["dep:stacksafe"]
 hot-reload = [
     "dep:async-tungstenite",
