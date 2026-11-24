@@ -582,6 +582,11 @@ impl WindowsWindow {
             }
             unsafe { SetWindowPlacement(hwnd, &placement)? };
         } else {
+            // Apps lay out and draw hidden windows too, so a hidden window takes its bounds
+            // before its first show.
+            let mut hidden = placement;
+            hidden.showCmd = SW_HIDE.0 as u32;
+            unsafe { SetWindowPlacement(hwnd, &hidden)? };
             this.state.initial_placement.set(Some(WindowOpenStatus {
                 placement,
                 state: WindowOpenState::Windowed,
