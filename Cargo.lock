@@ -7482,6 +7482,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui_emoji"
+version = "0.1.0"
+dependencies = [
+ "smallvec",
+ "unicode-properties",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "gpui_ios"
 version = "0.1.0"
 dependencies = [
@@ -7713,6 +7722,7 @@ dependencies = [
  "etagere",
  "futures 0.3.34",
  "gpui",
+ "gpui_emoji",
  "gpui_util",
  "image",
  "itertools 0.14.0",

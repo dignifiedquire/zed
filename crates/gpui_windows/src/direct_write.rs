@@ -24,6 +24,9 @@ use windows_numerics::Vector2;
 use crate::*;
 use gpui::*;
 
+/// The colour emoji font Windows ships.
+const EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
+
 #[derive(Debug)]
 struct FontInfo {
     font_family_h: HSTRING,
@@ -31,6 +34,46 @@ struct FontInfo {
     features: IDWriteTypography,
     fallbacks: Option<IDWriteFontFallback>,
     font_collection: IDWriteFontCollection1,
+}
+
+/// The colour emoji face that emoji clusters draw from.
+#[derive(Debug)]
+struct EmojiFont {
+    family: HSTRING,
+    collection: IDWriteFontCollection1,
+    face: IDWriteFontFace3,
+}
+
+impl EmojiFont {
+    /// Returns the first face of `family` in `collection`, if it has one.
+    fn find(collection: &IDWriteFontCollection1, family: &str) -> Option<Self> {
+        let family = HSTRING::from(family);
+        let face = unsafe {
+            let fonts = collection
+                .GetFontSet()
+                .ok()?
+                .GetMatchingFonts(
+                    &family,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                )
+                .ok()?;
+            if fonts.GetFontCount() == 0 {
+                return None;
+            }
+            fonts.GetFontFaceReference(0).ok()?.CreateFontFace().ok()?
+        };
+        Some(Self {
+            family,
+            collection: collection.clone(),
+            face,
+        })
+    }
+
+    fn covers(&self, character: char) -> bool {
+        unsafe { self.face.HasCharacter(character as u32).as_bool() }
+    }
 }
 
 pub(crate) struct DirectWriteTextSystem {
@@ -61,6 +104,7 @@ impl Drop for DirectWriteComponents {
 struct DirectWriteState {
     system_font_collection: IDWriteFontCollection1,
     custom_font_collection: IDWriteFontCollection1,
+    emoji_font: Option<EmojiFont>,
     fonts: Vec<FontInfo>,
     font_to_font_id: HashMap<Font, FontId>,
     font_info_cache: HashMap<usize, FontId>,
@@ -107,11 +151,13 @@ impl DirectWriteTextSystem {
                 .CreateFontCollectionFromFontSet(&custom_font_set)?
         };
 
+        let emoji_font = EmojiFont::find(&system_font_collection, EMOJI_FONT_FAMILY);
         Ok(Self {
             components,
             state: RwLock::new(DirectWriteState {
                 system_font_collection,
                 custom_font_collection,
+                emoji_font,
                 fonts: Vec::new(),
                 font_to_font_id: HashMap::default(),
                 font_info_cache: HashMap::default(),
@@ -571,6 +617,7 @@ impl DirectWriteState {
 
                 break_ligatures = !break_ligatures;
             }
+            self.draw_emoji_from_emoji_font(&text_layout, text, font_runs)?;
 
             let mut runs = Vec::new();
             let mut renderer_context = RendererContext {
@@ -598,6 +645,59 @@ impl DirectWriteState {
                 len: text.len(),
             })
         }
+    }
+
+    /// Draws the grapheme clusters of `text` that ask for emoji presentation
+    /// from the emoji font.
+    fn draw_emoji_from_emoji_font(
+        &self,
+        layout: &IDWriteTextLayout,
+        text: &str,
+        font_runs: &[FontRun],
+    ) -> Result<()> {
+        // DirectWrite picks fonts by character coverage and ignores the emoji presentation
+        // selector, so a keycap or a symbol with U+FE0F would stay text.
+        let Some(emoji_font) = &self.emoji_font else {
+            return Ok(());
+        };
+        if text.is_ascii() {
+            return Ok(());
+        }
+        let emoji_font_covers = |character: char| emoji_font.covers(character);
+        let mut run_start = 0;
+        let mut utf8_offset = 0;
+        let mut utf16_offset = 0;
+        for run in font_runs {
+            let run_range = run_start..run_start + run.len;
+            run_start = run_range.end;
+            let primary = &self.fonts[run.font_id.0].font_face;
+            let primary_covers =
+                |character: char| unsafe { primary.HasCharacter(character as u32).as_bool() };
+            for cluster in gpui_emoji::emoji_presentation_clusters(
+                text,
+                run_range,
+                &primary_covers,
+                &emoji_font_covers,
+            ) {
+                utf16_offset += text[utf8_offset..cluster.start].encode_utf16().count() as u32;
+                let length = text[cluster.clone()].encode_utf16().count() as u32;
+                let range = DWRITE_TEXT_RANGE {
+                    startPosition: utf16_offset,
+                    length,
+                };
+                unsafe {
+                    layout.SetFontCollection(&emoji_font.collection, range)?;
+                    layout.SetFontFamilyName(&emoji_font.family, range)?;
+                    // The emoji font has a single face, which a bold or italic run would
+                    // otherwise simulate.
+                    layout.SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, range)?;
+                    layout.SetFontStyle(DWRITE_FONT_STYLE_NORMAL, range)?;
+                }
+                utf16_offset += length;
+                utf8_offset = cluster.end;
+            }
+        }
+        Ok(())
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -1800,7 +1900,10 @@ mod tests {
     use super::DirectWriteTextSystem;
     use crate::direct_write::ClusterAnalyzer;
     use anyhow::Result;
-    use gpui::{Font, FontWeight, PlatformTextSystem, TextRun, TextSystem, WindowTextSystem, px};
+    use gpui::{
+        Font, FontId, FontRun, FontWeight, PlatformTextSystem, TextRun, TextSystem,
+        WindowTextSystem, px,
+    };
     use std::sync::Arc;
     use windows::Win32::Graphics::DirectWrite::{DWRITE_FONT_STRETCH_NORMAL, DWRITE_TEXT_METRICS};
 
@@ -1927,6 +2030,83 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn setup_segoe_ui() -> Result<(DirectWriteTextSystem, FontId)> {
+        let text_system = DirectWriteTextSystem::new()?;
+        let font_id = text_system.font_id(&Font {
+            family: "Segoe UI".into(),
+            ..Default::default()
+        })?;
+        Ok((text_system, font_id))
+    }
+
+    /// Returns the family and emoji flag of each glyph of `text`, laid out in `font_id`.
+    fn glyph_fonts(
+        text_system: &DirectWriteTextSystem,
+        font_id: FontId,
+        text: &str,
+    ) -> Vec<(String, bool)> {
+        let runs = [FontRun {
+            len: text.len(),
+            font_id,
+        }];
+        let layout = text_system.layout_line(text, px(16.0), &runs);
+        let state = text_system.state.read();
+        layout
+            .runs
+            .iter()
+            .flat_map(|run| {
+                let family = state.fonts[run.font_id.0].font_family_h.to_string();
+                run.glyphs
+                    .iter()
+                    .map(move |glyph| (family.clone(), glyph.is_emoji))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn emoji_presentation_selector_draws_from_the_emoji_font() -> Result<()> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        for text in [
+            "1\u{fe0f}\u{20e3}",
+            "#\u{fe0f}\u{20e3}",
+            "\u{25b6}\u{fe0f}",
+            "\u{a9}\u{fe0f}",
+            "\u{2194}\u{fe0f}",
+        ] {
+            assert_eq!(
+                glyph_fonts(&text_system, segoe_ui, text),
+                [("Segoe UI Emoji".to_owned(), true)],
+                "{text:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn text_default_emoji_without_a_selector_stay_in_the_text_font() -> Result<()> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        for text in ["\u{a9}", "1"] {
+            assert_eq!(
+                glyph_fonts(&text_system, segoe_ui, text),
+                [("Segoe UI".to_owned(), false)],
+                "{text:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn emoji_presentation_keeps_the_surrounding_text_font() -> Result<()> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        let text = ("Segoe UI".to_owned(), false);
+        let emoji = ("Segoe UI Emoji".to_owned(), true);
+        assert_eq!(
+            glyph_fonts(&text_system, segoe_ui, "a1\u{fe0f}\u{20e3}b"),
+            [text.clone(), emoji, text]
+        );
         Ok(())
     }
 
