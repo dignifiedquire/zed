@@ -76,6 +76,13 @@ impl EmojiFont {
     }
 }
 
+/// A font with COLRv1 glyphs, which the painter draws, as GPUI's DirectWrite path draws COLR
+/// layers only.
+struct PaintedFont {
+    family: HSTRING,
+    data: Cow<'static, [u8]>,
+}
+
 pub(crate) struct DirectWriteTextSystem {
     components: DirectWriteComponents,
     state: RwLock<DirectWriteState>,
@@ -105,6 +112,7 @@ struct DirectWriteState {
     system_font_collection: IDWriteFontCollection1,
     custom_font_collection: IDWriteFontCollection1,
     emoji_font: Option<EmojiFont>,
+    painted_fonts: Vec<PaintedFont>,
     fonts: Vec<FontInfo>,
     font_to_font_id: HashMap<Font, FontId>,
     font_info_cache: HashMap<usize, FontId>,
@@ -158,6 +166,7 @@ impl DirectWriteTextSystem {
                 system_font_collection,
                 custom_font_collection,
                 emoji_font,
+                painted_fonts: Vec::new(),
                 fonts: Vec::new(),
                 font_to_font_id: HashMap::default(),
                 font_info_cache: HashMap::default(),
@@ -297,6 +306,12 @@ impl DirectWriteState {
         fonts: Vec<Cow<'static, [u8]>>,
     ) -> Result<()> {
         for font_data in fonts {
+            if let Some(family) = gpui_emoji::colrv1_family(&font_data) {
+                self.painted_fonts.push(PaintedFont {
+                    family: HSTRING::from(family),
+                    data: font_data.clone(),
+                });
+            }
             match font_data {
                 Cow::Borrowed(data) => unsafe {
                     let font_file = components
@@ -325,6 +340,13 @@ impl DirectWriteState {
         let set = unsafe { components.builder.CreateFontSet()? };
         let collection = unsafe { components.factory.CreateFontCollectionFromFontSet(&set)? };
         self.custom_font_collection = collection;
+        // A bundled colour emoji font draws emoji in place of Segoe UI Emoji, which has no
+        // flags.
+        if let Some(bundled) = self.painted_fonts.last().and_then(|font| {
+            EmojiFont::find(&self.custom_font_collection, &font.family.to_string())
+        }) {
+            self.emoji_font = Some(bundled);
+        }
 
         Ok(())
     }
@@ -674,6 +696,15 @@ impl DirectWriteState {
         }
     }
 
+    /// Returns the data of the font `font_id` when the painter draws it.
+    fn painted_data(&self, font_id: FontId) -> Option<&[u8]> {
+        let family = &self.fonts.get(font_id.0)?.font_family_h;
+        self.painted_fonts
+            .iter()
+            .find(|font| font.family == *family)
+            .map(|font| &*font.data)
+    }
+
     /// Draws the grapheme clusters of `text` that ask for emoji presentation
     /// from the emoji font.
     fn draw_emoji_from_emoji_font(
@@ -899,6 +930,16 @@ impl DirectWriteState {
         components: &DirectWriteComponents,
         params: &RenderGlyphParams,
     ) -> Result<Bounds<DevicePixels>> {
+        if params.is_emoji
+            && let Some(data) = self.painted_data(params.font_id)
+            && let Some((left, top, width, height)) =
+                gpui_emoji::color_glyph_bounds(data, params.glyph_id.0, painted_size(params))
+        {
+            return Ok(Bounds {
+                origin: point(DevicePixels(left), DevicePixels(-top)),
+                size: size(DevicePixels(width as i32), DevicePixels(height as i32)),
+            });
+        }
         let color_layers = if params.is_emoji {
             self.color_layers(components, params)
                 .context("Failed to measure color glyph layers")
@@ -959,7 +1000,9 @@ impl DirectWriteState {
         }
 
         let bitmap_data = if params.is_emoji {
-            if let Ok(color) = self.rasterize_color(components, params, glyph_bounds) {
+            if let Some(painted) = self.rasterize_painted(params, glyph_bounds) {
+                painted
+            } else if let Ok(color) = self.rasterize_color(components, params, glyph_bounds) {
                 color
             } else {
                 let monochrome = self.rasterize_monochrome(components, params, glyph_bounds)?;
@@ -973,6 +1016,26 @@ impl DirectWriteState {
         };
 
         Ok((glyph_bounds.size, bitmap_data))
+    }
+
+    /// Paints a glyph of a font the painter draws, as straight BGRA the size of `glyph_bounds`.
+    fn rasterize_painted(
+        &self,
+        params: &RenderGlyphParams,
+        glyph_bounds: Bounds<DevicePixels>,
+    ) -> Option<Vec<u8>> {
+        let data = self.painted_data(params.font_id)?;
+        let image = gpui_emoji::paint_color_glyph(data, params.glyph_id.0, painted_size(params))?;
+        if (image.width as i32, image.height as i32)
+            != (glyph_bounds.size.width.0, glyph_bounds.size.height.0)
+        {
+            return None;
+        }
+        let mut bgra = image.rgba;
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+        Some(bgra)
     }
 
     fn rasterize_monochrome(
@@ -1522,6 +1585,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             }
         } else {
             let color_font = unsafe { font_face.IsColorFont().as_bool() };
+            let painted = context.text_system.painted_data(font_id);
 
             let glyph_ids = unsafe {
                 slice_from_nullable(
@@ -1566,8 +1630,12 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                     .enumerate()
                 {
                     let id = GlyphId(*glyph_id as u32);
-                    let is_emoji =
-                        color_font && is_color_glyph(font_face, id, &context.components.factory);
+                    let is_emoji = match painted {
+                        Some(data) => gpui_emoji::has_color_glyph(data, id.0),
+                        None => {
+                            color_font && is_color_glyph(font_face, id, &context.components.factory)
+                        }
+                    };
                     let this_glyph_idx = glyph_idx + cluster_glyph_idx;
                     // Emoji draw larger than shaped, and the font's missing glyph keeps its
                     // size.
@@ -1942,6 +2010,11 @@ fn is_color_glyph(
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
 
+/// Returns the pixels per em a painted glyph draws at.
+fn painted_size(params: &RenderGlyphParams) -> f32 {
+    params.font_size.as_f32() * params.scale_factor * glyph_scale(params)
+}
+
 /// Returns the factor a glyph draws larger than its font size: the emoji factor for an emoji,
 /// except the font's missing glyph.
 fn glyph_scale(params: &RenderGlyphParams) -> f32 {
@@ -2285,6 +2358,54 @@ mod tests {
             (distance - emoji_advance).abs() < px(0.01),
             "{distance:?} != {emoji_advance:?}"
         );
+        Ok(())
+    }
+
+    const NOTO_COLRV1_SUBSET: &[u8] = include_bytes!(
+        "../../gpui_emoji/test_data/noto-color-emoji/NotoColorEmoji-COLRv1-Subset.ttf"
+    );
+
+    fn setup_bundled_emoji() -> Result<(DirectWriteTextSystem, FontId)> {
+        let (text_system, segoe_ui) = setup_segoe_ui()?;
+        text_system.add_fonts(vec![std::borrow::Cow::Borrowed(NOTO_COLRV1_SUBSET)])?;
+        Ok((text_system, segoe_ui))
+    }
+
+    #[test]
+    fn bundled_emoji_font_draws_flags_keycaps_and_families_as_one_glyph() -> Result<()> {
+        let (text_system, segoe_ui) = setup_bundled_emoji()?;
+        for text in [
+            "\u{1f1e9}\u{1f1ea}",
+            "1\u{fe0f}\u{20e3}",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}",
+            "\u{1f600}",
+        ] {
+            assert_eq!(
+                glyph_fonts(&text_system, segoe_ui, text),
+                [("Noto Color Emoji".to_owned(), true)],
+                "{text:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn bundled_emoji_rasterize_in_colour() -> Result<()> {
+        let (text_system, segoe_ui) = setup_bundled_emoji()?;
+        for text in ["\u{1f600}", "\u{1f1e9}\u{1f1ea}"] {
+            let layout = layout_in(&text_system, segoe_ui, text, 32.);
+            let run = layout.runs.first().context("no run")?;
+            let glyph = run.glyphs.first().context("no glyph")?;
+            let params = emoji_params(run.font_id, glyph, 32.);
+            let bounds = text_system.glyph_raster_bounds(&params)?;
+            let (size, bgra) = text_system.rasterize_glyph(&params, bounds)?;
+            assert_eq!(size, bounds.size);
+            let saturated = bgra.chunks_exact(4).any(|pixel| {
+                let [blue, green, red, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+                alpha == 255 && red.max(green).max(blue) - red.min(green).min(blue) > 100
+            });
+            assert!(saturated, "{text:?} has no coloured pixel");
+        }
         Ok(())
     }
 

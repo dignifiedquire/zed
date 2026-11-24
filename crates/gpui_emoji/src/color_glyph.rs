@@ -11,6 +11,7 @@ use skrifa::{
     instance::{LocationRef, Size},
     outline::{DrawSettings, OutlinePen},
     raw::{TableProvider as _, types::BoundingBox},
+    string::StringId,
 };
 use tiny_skia::{
     BlendMode, Color, FillRule, GradientStop, LinearGradient, Mask, Paint, Path, PathBuilder,
@@ -27,6 +28,19 @@ pub struct ColorImage {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+}
+
+/// Returns the family of the font in `data` when the font has COLRv1 glyphs,
+/// which only the painter draws.
+pub fn colrv1_family(data: &[u8]) -> Option<String> {
+    let font = FontRef::new(data).ok()?;
+    if font.colr().ok()?.version() < 1 {
+        return None;
+    }
+    let family = font
+        .localized_strings(StringId::FAMILY_NAME)
+        .english_or_first()?;
+    Some(family.to_string())
 }
 
 /// Returns whether the font in `data` has a COLR glyph for `glyph`.
@@ -523,6 +537,15 @@ mod tests {
         });
         let pixel = painter.layers[0].pixel(28, 20).expect("pixel").demultiply();
         assert_eq!((pixel.red(), pixel.blue()), (255, 0));
+    }
+
+    #[test]
+    fn colrv1_fonts_name_their_family() {
+        assert_eq!(
+            colrv1_family(NOTO_COLRV1_SUBSET).as_deref(),
+            Some("Noto Color Emoji")
+        );
+        assert_eq!(colrv1_family(b"not a font"), None);
     }
 
     #[test]
