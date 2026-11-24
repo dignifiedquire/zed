@@ -9,6 +9,63 @@ fn main() {
         #[cfg(not(debug_assertions))]
         compile_shaders();
     }
+    #[cfg(not(target_os = "windows"))]
+    prebuilt_shaders::copy();
+}
+
+/// Returns the FNV-1a hash of `bytes`.
+#[cfg(any(not(target_os = "windows"), not(debug_assertions)))]
+fn source_hash(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Returns the first line of a compiled shader file, which names the hash of
+/// the `shaders.hlsl` it was compiled from.
+#[cfg(any(not(target_os = "windows"), not(debug_assertions)))]
+fn source_line(source: &[u8]) -> String {
+    format!("// shaders.hlsl FNV-1a {:016x}\n", source_hash(source))
+}
+
+/// Cross-compiled Windows release builds take their shaders from a native
+/// build, as fxc.exe runs only on Windows.
+#[cfg(not(target_os = "windows"))]
+mod prebuilt_shaders {
+    use std::{env, fs, path::PathBuf, process};
+
+    pub fn copy() {
+        let is_windows_release = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+            && env::var_os("CARGO_CFG_DEBUG_ASSERTIONS").is_none();
+        if !is_windows_release {
+            return;
+        }
+        println!("cargo:rerun-if-env-changed=GPUI_SHADERS_BYTES");
+        let shader_path =
+            PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/shaders.hlsl");
+        println!("cargo:rerun-if-changed={}", shader_path.display());
+        let Some(prebuilt) = env::var_os("GPUI_SHADERS_BYTES").map(PathBuf::from) else {
+            println!(
+                "cargo::error=A Windows release build cross-compiled from another OS needs \
+                 GPUI_SHADERS_BYTES: the shaders_bytes.rs a native Windows release build of the \
+                 same shaders.hlsl wrote to its OUT_DIR."
+            );
+            process::exit(1);
+        };
+        println!("cargo:rerun-if-changed={}", prebuilt.display());
+        let source = fs::read(&shader_path).expect("Failed to read shaders.hlsl");
+        let compiled = fs::read_to_string(&prebuilt).expect("Failed to read GPUI_SHADERS_BYTES");
+        if !compiled.starts_with(&super::source_line(&source)) {
+            println!(
+                "cargo::error={} was compiled from another shaders.hlsl. Build gpui_windows \
+                 natively on Windows in release and take its OUT_DIR/shaders_bytes.rs.",
+                prebuilt.display()
+            );
+            process::exit(1);
+        }
+        let out = PathBuf::from(env::var("OUT_DIR").unwrap()).join("shaders_bytes.rs");
+        fs::write(out, compiled).expect("Failed to write shaders_bytes.rs");
+    }
 }
 
 #[cfg(all(target_os = "windows", not(debug_assertions)))]
@@ -43,10 +100,10 @@ mod shader_compilation {
         ];
 
         let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);
-        if Path::new(&rust_binding_path).exists() {
-            fs::remove_file(&rust_binding_path)
-                .expect("Failed to remove existing Rust binding file");
-        }
+        // A cross-compiled build checks this line against its own shaders.hlsl.
+        let source = fs::read(&shader_path).expect("Failed to read shaders.hlsl");
+        fs::write(&rust_binding_path, super::source_line(&source))
+            .expect("Failed to start the Rust binding file");
         for module in modules {
             compile_shader_for_module(
                 module,
