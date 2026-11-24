@@ -1,4 +1,4 @@
-//! Painting of COLR glyphs, version 0 and 1, with skrifa and tiny-skia.
+//! The painter of COLR glyphs, versions 0 and 1, on skrifa and tiny-skia.
 
 use std::collections::BTreeMap;
 
@@ -219,7 +219,7 @@ impl Painter<'_> {
             .map_or((1, 1), |layer| (layer.width(), layer.height()))
     }
 
-    /// Returns the paint of `brush`, whose shader takes `shader_transform`.
+    /// Returns the paint of `brush`, with `shader_transform` for its shader.
     fn paint(&self, brush: &Brush<'_>, shader_transform: Transform) -> Paint<'static> {
         let shader = match brush {
             Brush::Solid {

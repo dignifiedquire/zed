@@ -76,8 +76,8 @@ impl EmojiFont {
     }
 }
 
-/// A font with COLRv1 glyphs, which the painter draws, as GPUI's DirectWrite path draws COLR
-/// layers only.
+/// A COLRv1 font. GPUI's DirectWrite path draws COLR layers only, so the painter draws its
+/// glyphs.
 struct PaintedFont {
     family: HSTRING,
     data: Cow<'static, [u8]>,
@@ -340,8 +340,8 @@ impl DirectWriteState {
         let set = unsafe { components.builder.CreateFontSet()? };
         let collection = unsafe { components.factory.CreateFontCollectionFromFontSet(&set)? };
         self.custom_font_collection = collection;
-        // A bundled colour emoji font draws emoji in place of Segoe UI Emoji, which has no
-        // flags.
+        // Segoe UI Emoji has no flags, so a bundled colour emoji font draws emoji in its
+        // place.
         if let Some(bundled) = self.painted_fonts.last().and_then(|font| {
             EmojiFont::find(&self.custom_font_collection, &font.family.to_string())
         }) {
@@ -746,8 +746,8 @@ impl DirectWriteState {
                 unsafe {
                     layout.SetFontCollection(&emoji_font.collection, range)?;
                     layout.SetFontFamilyName(&emoji_font.family, range)?;
-                    // The emoji font has a single face, which a bold or italic run would
-                    // otherwise simulate.
+                    // A bold or italic run would otherwise simulate a weight or style the emoji
+                    // font lacks.
                     layout.SetFontWeight(DWRITE_FONT_WEIGHT_NORMAL, range)?;
                     layout.SetFontStyle(DWRITE_FONT_STYLE_NORMAL, range)?;
                 }
