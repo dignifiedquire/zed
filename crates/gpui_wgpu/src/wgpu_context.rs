@@ -495,6 +495,8 @@ impl WgpuContext {
             // wgpu's `WGPU_BACKEND` picks a backend, such as Vulkan where a software GL
             // adapter would win but cannot import the DMA-BUFs of video surfaces.
             backends: wgpu::Backends::from_env()
+                .map(|backends| backends & (wgpu::Backends::VULKAN | wgpu::Backends::GL))
+                .filter(|backends| !backends.is_empty())
                 .unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::GL),
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),

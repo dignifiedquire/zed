@@ -481,8 +481,6 @@ mod tests {
         Ok(())
     }
 
-    /// Returns a frame of `width` by `height` samples in a DMA-BUF of `/dev/udmabuf`,
-    /// whose sample at each point is `sample(x, y)` as luma, Cb and Cr.
     fn setup_nv12_frame(
         width: u32,
         height: u32,

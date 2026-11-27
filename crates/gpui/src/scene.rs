@@ -1184,6 +1184,9 @@ pub struct PaintSurface {
 
 /// A video frame in DMA-BUFs: a luma plane, and a chroma plane of interleaved Cb and Cr
 /// samples at half the width and height, as decoders export NV12.
+///
+/// The producer has finished writing the planes when it hands the frame over, as after
+/// `vaSyncSurface`, and leaves them unchanged while the frame may be drawn.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[derive(Debug)]
 pub struct DmaBufFrame {
@@ -1197,13 +1200,13 @@ pub struct DmaBufFrame {
     pub chroma: DmaBufPlane,
     /// How the samples code colour.
     pub coding: YCbCrCoding,
-    /// Whatever must stay alive while the frame may be drawn, such as the decoder's
-    /// surface behind the planes.
+    /// The value kept alive while the frame may be drawn, such as the decoder's surface
+    /// holding the planes.
     pub owner: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
 }
 
-/// Two frames are equal only when they are the same frame, as their planes are buffers
-/// that other processes may write.
+/// Two frames are equal only when they are the same frame, as other processes may write
+/// their planes.
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 impl PartialEq for DmaBufFrame {
     fn eq(&self, other: &Self) -> bool {
@@ -1228,7 +1231,7 @@ pub struct DmaBufPlane {
     pub modifier: u64,
 }
 
-/// The matrix of a YCbCr image, which sets the weights of red and blue in luma.
+/// The matrix of a YCbCr image, setting the weights of red and blue in luma.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum YCbCrMatrix {
     /// ITU-R BT.601, which standard-definition video and JPEG use.

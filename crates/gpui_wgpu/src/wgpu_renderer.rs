@@ -1731,9 +1731,11 @@ impl WgpuRendererCore {
                 .iter()
                 .map(|surface| {
                     let resources = self.resources_mut();
-                    let (luma, chroma) = resources
-                        .surface_frames
-                        .textures(&resources.device, &surface.frame)?;
+                    let (luma, chroma) = resources.surface_frames.textures(
+                        &resources.device,
+                        &resources.queue,
+                        &surface.frame,
+                    )?;
                     Some(self.create_surface_bind_group(surface, &luma, &chroma))
                 })
                 .collect()
