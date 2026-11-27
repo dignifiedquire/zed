@@ -85,6 +85,9 @@ struct LoadedFont {
     coords: Vec<NormalizedCoord>,
     features: CosmicFontFeatures,
     is_known_emoji_font: bool,
+    /// The face's index in its font file when the face has COLRv1 glyphs, which
+    /// gpui_emoji's painter draws.
+    color_face: Option<u32>,
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
@@ -313,6 +316,12 @@ impl CosmicTextSystemState {
         &self.loaded_fonts[font_id.0]
     }
 
+    /// Returns the index of `font`'s face in its font file when the face has COLRv1 glyphs.
+    fn color_face(&self, font: &CosmicTextFont) -> Option<u32> {
+        let face = self.font_system.db().face(font.id())?;
+        has_colr_v1_glyphs(font.as_swash()).then_some(face.index)
+    }
+
     fn font_match_properties(&self, font_id: FontId) -> Option<FontMatchProperties> {
         let loaded_font = self.loaded_font(font_id);
         let Some(face) = self.font_system.db().face(loaded_font.font.id()) else {
@@ -355,9 +364,9 @@ impl CosmicTextSystemState {
         self.font_ids_by_family_cache.clear();
         let db = self.font_system.db_mut();
         for bytes in fonts {
-            let loaded = db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
-            for id in loaded {
-                remove_other_faces_of_emoji_family(db, id);
+            let added = db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
+            for id in added {
+                remove_other_faces_of_emoji_family(db, id, &self.loaded_fonts);
             }
         }
         self.emoji_face = find_emoji_face(self.font_system.db());
@@ -474,12 +483,14 @@ impl CosmicTextSystemState {
 
             let font_id = FontId(self.loaded_fonts.len());
             loaded_font_ids.push(font_id);
+            let color_face = self.color_face(&font);
             self.loaded_fonts.push(LoadedFont {
                 coords: weight_coords(&font, weight),
                 font,
                 weight,
                 features: cosmic_features.clone(),
                 is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
+                color_face,
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
@@ -517,6 +528,7 @@ impl CosmicTextSystemState {
         let user_fallback_chain = Arc::clone(&loaded_font.user_fallback_chain);
         let features = loaded_font.features.clone();
         let is_known_emoji_font = loaded_font.is_known_emoji_font;
+        let color_face = loaded_font.color_face;
         if let Some(&instance_id) = self.loaded_font_ids_by_key.get(&key) {
             self.loaded_fonts[instance_id.0].user_fallback_chain = user_fallback_chain;
             return Ok(instance_id);
@@ -533,6 +545,7 @@ impl CosmicTextSystemState {
             weight,
             features,
             is_known_emoji_font,
+            color_face,
             user_fallback_chain,
         });
         self.loaded_font_ids_by_key.insert(key, instance_id);
@@ -618,14 +631,14 @@ impl CosmicTextSystemState {
         } else {
             f32::from(params.font_size)
         };
-        // swash draws COLRv1 glyphs blank, so gpui_emoji's painter draws COLR glyphs.
-        if params.is_emoji && params.glyph_id.0 != 0 {
+        // swash draws COLRv1 glyphs blank, so gpui_emoji's painter draws them.
+        if let Some(index) = loaded_font.color_face {
             let data = loaded_font.font.data();
-            if gpui_emoji::has_color_glyph(data, params.glyph_id.0) {
+            if params.is_emoji && gpui_emoji::has_color_glyph(data, index, params.glyph_id.0) {
                 let pixels = pixel_size * params.scale_factor;
-                if let Some(image) = gpui_emoji::paint_color_glyph(data, params.glyph_id.0, pixels)
-                {
-                    return Ok(colour_image(image));
+                match gpui_emoji::paint_color_glyph(data, index, params.glyph_id.0, pixels) {
+                    Some(image) => return Ok(color_image(image)),
+                    None => log::warn!("gpui_emoji could not paint {params:?}"),
                 }
             }
         }
@@ -700,6 +713,7 @@ impl CosmicTextSystemState {
                 .as_ref()
                 .is_some_and(|(emoji_face_id, _)| *emoji_face_id == id);
             let font_id = FontId(self.loaded_fonts.len());
+            let color_face = self.color_face(&font);
             self.loaded_fonts.push(LoadedFont {
                 coords: weight_coords(&font, face.weight),
                 font,
@@ -707,6 +721,7 @@ impl CosmicTextSystemState {
                 features: CosmicFontFeatures::new(),
                 is_known_emoji_font: is_emoji_face
                     || check_is_known_emoji_font(&face.post_script_name),
+                color_face,
                 user_fallback_chain: Arc::from(Vec::new()),
             });
 
@@ -1408,31 +1423,50 @@ fn find_emoji_face(
     })
 }
 
-// swash paints CBDT and sbix bitmaps and COLR version 0 layers, and gpui_emoji's
-// painter paints the BaseGlyphList of COLR version 1.
+/// Returns whether the font has color glyphs that GPUI paints: swash paints CBDT and sbix
+/// bitmaps and COLR version 0 layers, and gpui_emoji's painter paints COLRv1 glyphs.
 fn has_paintable_color_glyphs(font: swash::FontRef) -> bool {
     let table = |tag| font.table(swash::tag_from_bytes(tag));
-    let colr = table(b"COLR");
-    let is_set =
-        |field: Option<&[u8]>| field.is_some_and(|bytes| bytes.iter().any(|byte| *byte != 0));
-    let has_colr_layers = is_set(colr.and_then(|colr| colr.get(2..4)));
-    let has_colr_v1_glyphs =
-        colr.is_some_and(|colr| colr.get(0..2) == Some(&[0, 1]) && is_set(colr.get(14..18)));
-    table(b"CBDT").is_some() || table(b"sbix").is_some() || has_colr_layers || has_colr_v1_glyphs
+    let has_colr_layers = table(b"COLR")
+        .and_then(|colr| colr.get(2..4))
+        .is_some_and(|base_glyph_count| base_glyph_count.iter().any(|byte| *byte != 0));
+    table(b"CBDT").is_some()
+        || table(b"sbix").is_some()
+        || has_colr_layers
+        || has_colr_v1_glyphs(font)
 }
 
-/// Removes the faces of `id`'s emoji family other than `id`, so that the copy of an
-/// emoji font the app adds draws in place of the system's.
+/// Returns whether the font has a COLR table of version 1 with a BaseGlyphList.
+fn has_colr_v1_glyphs(font: swash::FontRef) -> bool {
+    font.table(swash::tag_from_bytes(b"COLR"))
+        .is_some_and(|colr| {
+            colr.get(0..2) == Some(&[0, 1])
+                && colr
+                    .get(14..18)
+                    .is_some_and(|offset| offset.iter().any(|byte| *byte != 0))
+        })
+}
+
+/// Removes the faces of `id`'s emoji family other than `id` when GPUI can paint `id`, so
+/// that the copy of an emoji font the app adds draws in place of the system's. A face that
+/// `loaded` already uses stays.
 fn remove_other_faces_of_emoji_family(
     db: &mut cosmic_text::fontdb::Database,
     id: cosmic_text::fontdb::ID,
+    loaded: &[LoadedFont],
 ) {
-    let Some(family) = db.face(id).and_then(|face| {
+    let is_paintable = db
+        .with_face_data(id, |data, index| {
+            swash::FontRef::from_index(data, index as usize).is_some_and(has_paintable_color_glyphs)
+        })
+        .unwrap_or(false);
+    let family = db.face(id).and_then(|face| {
         face.families
             .iter()
             .map(|(name, _)| name.clone())
             .find(|name| EMOJI_FONT_FAMILIES.contains(&name.as_str()))
-    }) else {
+    });
+    let Some(family) = family.filter(|_| is_paintable) else {
         return;
     };
     let others: Vec<_> = db
@@ -1441,12 +1475,16 @@ fn remove_other_faces_of_emoji_family(
         .map(|face| face.id)
         .collect();
     for other in others {
+        if loaded.iter().any(|font| font.font.id() == other) {
+            log::warn!("the {family} face that text already uses stays beside the added copy");
+            continue;
+        }
         db.remove_face(other);
     }
 }
 
-/// Returns a glyph that gpui_emoji painted as swash's colour image, which the atlas takes.
-fn colour_image(image: gpui_emoji::ColorImage) -> swash::scale::image::Image {
+/// Returns a glyph that gpui_emoji painted as swash's color image, which the atlas takes.
+fn color_image(image: gpui_emoji::ColorImage) -> swash::scale::image::Image {
     swash::scale::image::Image {
         source: Source::ColorOutline(0),
         content: swash::scale::image::Content::Color,
@@ -2163,6 +2201,8 @@ mod tests {
         include_bytes!("../test_data/dejavu-sans/DejaVuSans-Subset.ttf");
     const NOTO_COLOR_EMOJI_SUBSET: &[u8] =
         include_bytes!("../test_data/noto-color-emoji/NotoColorEmoji-Subset.ttf");
+    const NOTO_COLOR_EMOJI_NO_COLOR_SUBSET: &[u8] =
+        include_bytes!("../test_data/noto-color-emoji/NotoColorEmoji-NoColor-Subset.ttf");
     const NOTO_COLOR_EMOJI_COLRV1_SUBSET: &[u8] = include_bytes!(
         "../../gpui_emoji/test_data/noto-color-emoji/NotoColorEmoji-COLRv1-Subset.ttf"
     );
@@ -2359,7 +2399,7 @@ mod tests {
             emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_COLRV1_SUBSET])?;
         for text in ["😀", "❤\u{fe0f}", "🇩🇪", "🔥"] {
             let colored = colored_pixels(&text_system, text)?;
-            assert!(colored >= 300, "{text:?}: {colored} coloured pixels");
+            assert!(colored >= 300, "{text:?}: {colored} colored pixels");
         }
         Ok(())
     }
@@ -2389,7 +2429,47 @@ mod tests {
         assert_eq!(copies, 1);
         drop(state);
         let colored = colored_pixels(&text_system, "😀")?;
-        assert!(colored >= 300, "{colored} coloured pixels");
+        assert!(colored >= 300, "{colored} colored pixels");
+        Ok(())
+    }
+
+    fn emoji_face_tables(text_system: &CosmicTextSystem) -> Result<(bool, bool)> {
+        let emoji_font = emoji_font_id(text_system)?;
+        let state = text_system.0.read();
+        let font = state.loaded_fonts[emoji_font.0].font.as_swash();
+        let has = |tag| font.table(swash::tag_from_bytes(tag)).is_some();
+        Ok((has(b"CBDT"), has(b"COLR")))
+    }
+
+    #[test]
+    fn added_emoji_font_without_color_glyphs_leaves_the_systems_copy() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        text_system.add_fonts(vec![Cow::Borrowed(NOTO_COLOR_EMOJI_NO_COLOR_SUBSET)])?;
+        assert_eq!(emoji_face_tables(&text_system)?, (true, false));
+        let colored = colored_pixels(&text_system, "😀")?;
+        assert!(colored >= 300, "{colored} colored pixels");
+        Ok(())
+    }
+
+    #[test]
+    fn emoji_face_in_use_stays_beside_an_added_copy() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        let used = emoji_font_id(&text_system)?;
+        let used_face = text_system.0.read().loaded_fonts[used.0].font.id();
+        text_system.add_fonts(vec![Cow::Borrowed(NOTO_COLOR_EMOJI_COLRV1_SUBSET)])?;
+        assert!(
+            text_system
+                .0
+                .read()
+                .font_system
+                .db()
+                .face(used_face)
+                .is_some()
+        );
+        let colored = colored_pixels(&text_system, "😀")?;
+        assert!(colored >= 300, "{colored} colored pixels");
         Ok(())
     }
 

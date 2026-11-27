@@ -933,7 +933,7 @@ impl DirectWriteState {
         if params.is_emoji
             && let Some(data) = self.painted_data(params.font_id)
             && let Some((left, top, width, height)) =
-                gpui_emoji::color_glyph_bounds(data, params.glyph_id.0, painted_size(params))
+                gpui_emoji::color_glyph_bounds(data, 0, params.glyph_id.0, painted_size(params))
         {
             return Ok(Bounds {
                 origin: point(DevicePixels(left), DevicePixels(-top)),
@@ -1025,7 +1025,8 @@ impl DirectWriteState {
         glyph_bounds: Bounds<DevicePixels>,
     ) -> Option<Vec<u8>> {
         let data = self.painted_data(params.font_id)?;
-        let image = gpui_emoji::paint_color_glyph(data, params.glyph_id.0, painted_size(params))?;
+        let image =
+            gpui_emoji::paint_color_glyph(data, 0, params.glyph_id.0, painted_size(params))?;
         if (image.width as i32, image.height as i32)
             != (glyph_bounds.size.width.0, glyph_bounds.size.height.0)
         {
@@ -1631,7 +1632,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 {
                     let id = GlyphId(*glyph_id as u32);
                     let is_emoji = match painted {
-                        Some(data) => gpui_emoji::has_color_glyph(data, id.0),
+                        Some(data) => gpui_emoji::has_color_glyph(data, 0, id.0),
                         None => {
                             color_font && is_color_glyph(font_face, id, &context.components.factory)
                         }

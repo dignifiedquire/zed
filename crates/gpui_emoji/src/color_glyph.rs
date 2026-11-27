@@ -43,28 +43,35 @@ pub fn colrv1_family(data: &[u8]) -> Option<String> {
     Some(family.to_string())
 }
 
-/// Returns whether the font in `data` has a COLR glyph for `glyph`.
-pub fn has_color_glyph(data: &[u8], glyph: u32) -> bool {
-    FontRef::new(data).is_ok_and(|font| {
+/// Returns whether the face `index` of the font file `data` has a COLR glyph
+/// for `glyph`.
+pub fn has_color_glyph(data: &[u8], index: u32, glyph: u32) -> bool {
+    FontRef::from_index(data, index).is_ok_and(|font| {
         ColorGlyphCollection::new(&font)
             .get(GlyphId::new(glyph))
             .is_some()
     })
 }
 
-/// Returns the pixel bounds of the COLR glyph `glyph` of the font in `data`
-/// at `pixels` per em, as left, top, width and height.
-pub fn color_glyph_bounds(data: &[u8], glyph: u32, pixels: f32) -> Option<(i32, i32, u32, u32)> {
-    let font = FontRef::new(data).ok()?;
+/// Returns the pixel bounds of the COLR glyph `glyph` of the face `index` of
+/// the font file `data` at `pixels` per em, as left, top, width and height.
+pub fn color_glyph_bounds(
+    data: &[u8],
+    index: u32,
+    glyph: u32,
+    pixels: f32,
+) -> Option<(i32, i32, u32, u32)> {
+    let font = FontRef::from_index(data, index).ok()?;
     let color_glyph = ColorGlyphCollection::new(&font).get(GlyphId::new(glyph))?;
     let bounds = color_glyph.bounding_box(LocationRef::default(), Size::unscaled())?;
     let scale = pixels / f32::from(font.head().ok()?.units_per_em());
     Some(pixel_bounds(bounds, scale))
 }
 
-/// Paints the COLR glyph `glyph` of the font in `data` at `pixels` per em.
-pub fn paint_color_glyph(data: &[u8], glyph: u32, pixels: f32) -> Option<ColorImage> {
-    let font = FontRef::new(data).ok()?;
+/// Paints the COLR glyph `glyph` of the face `index` of the font file `data`
+/// at `pixels` per em.
+pub fn paint_color_glyph(data: &[u8], index: u32, glyph: u32, pixels: f32) -> Option<ColorImage> {
+    let font = FontRef::from_index(data, index).ok()?;
     let color_glyph = ColorGlyphCollection::new(&font).get(GlyphId::new(glyph))?;
     let bounds = color_glyph.bounding_box(LocationRef::default(), Size::unscaled())?;
     let scale = pixels / f32::from(font.head().ok()?.units_per_em());
@@ -463,7 +470,7 @@ mod tests {
 
     #[test]
     fn grinning_face_shades_from_a_yellow_centre_to_an_orange_rim() {
-        let image = paint_color_glyph(NOTO_COLRV1_SUBSET, glyph_of('😀'), 90.).expect("image");
+        let image = paint_color_glyph(NOTO_COLRV1_SUBSET, 0, glyph_of('😀'), 90.).expect("image");
         let (cx, cy) = (image.width / 2, image.height / 2);
         let [r, g, b, a] = pixel(&image, cx, cy / 3 + 4);
         assert_eq!(a, 255);
@@ -485,9 +492,9 @@ mod tests {
     fn painted_image_fills_the_raster_bounds_at_about_an_em() {
         for pixels in [16., 33.8, 90.] {
             let glyph = glyph_of('🔥');
-            let image = paint_color_glyph(NOTO_COLRV1_SUBSET, glyph, pixels).expect("image");
+            let image = paint_color_glyph(NOTO_COLRV1_SUBSET, 0, glyph, pixels).expect("image");
             let (left, top, width, height) =
-                color_glyph_bounds(NOTO_COLRV1_SUBSET, glyph, pixels).expect("bounds");
+                color_glyph_bounds(NOTO_COLRV1_SUBSET, 0, glyph, pixels).expect("bounds");
             assert_eq!(
                 (image.left, image.top, image.width, image.height),
                 (left, top, width, height)
@@ -550,8 +557,8 @@ mod tests {
 
     #[test]
     fn only_colr_glyphs_count_as_color_glyphs() {
-        assert!(has_color_glyph(NOTO_COLRV1_SUBSET, glyph_of('😀')));
-        assert!(!has_color_glyph(NOTO_COLRV1_SUBSET, 0));
-        assert!(!has_color_glyph(b"not a font", 1));
+        assert!(has_color_glyph(NOTO_COLRV1_SUBSET, 0, glyph_of('😀')));
+        assert!(!has_color_glyph(NOTO_COLRV1_SUBSET, 0, 0));
+        assert!(!has_color_glyph(b"not a font", 0, 1));
     }
 }
