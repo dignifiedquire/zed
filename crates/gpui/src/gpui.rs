@@ -352,4 +352,7 @@ pub struct GpuSpecs {
     pub driver_name: String,
     /// Further information about the driver, as reported by Vulkan.
     pub driver_info: String,
+    /// Whether surfaces draw video frames from DMA-BUFs, which takes Vulkan's
+    /// DMA-BUF import.
+    pub draws_dma_buf_surfaces: bool,
 }

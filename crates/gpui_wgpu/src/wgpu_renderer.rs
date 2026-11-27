@@ -1085,12 +1085,16 @@ impl WgpuRenderer {
     /// Returns `None` once GPU resources have been released by `destroy` or a pending
     /// device recovery.
     pub fn gpu_specs(&self) -> Option<GpuSpecs> {
-        let adapter_info = &self.core()?.adapter_info;
+        let core = self.core()?;
+        let adapter_info = &core.adapter_info;
+        let features = core.resources.device.features();
         Some(GpuSpecs {
             is_software_emulated: adapter_info.device_type == wgpu::DeviceType::Cpu,
             device_name: adapter_info.name.clone(),
             driver_name: adapter_info.driver.clone(),
             driver_info: adapter_info.driver_info.clone(),
+            draws_dma_buf_surfaces: features
+                .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF),
         })
     }
 

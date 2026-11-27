@@ -880,6 +880,7 @@ impl DirectXRenderer {
             device_name,
             driver_name,
             driver_info: driver_version,
+            draws_dma_buf_surfaces: false,
         })
     }
 
