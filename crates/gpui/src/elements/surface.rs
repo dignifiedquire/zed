@@ -14,6 +14,16 @@ pub enum SurfaceSource {
     /// A CoreVideo image buffer
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     Surface(CFRetained<CVPixelBuffer>),
+    /// A video frame in DMA-BUFs.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    DmaBuf(std::sync::Arc<crate::DmaBufFrame>),
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl From<std::sync::Arc<crate::DmaBufFrame>> for SurfaceSource {
+    fn from(value: std::sync::Arc<crate::DmaBufFrame>) -> Self {
+        SurfaceSource::DmaBuf(value)
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -25,6 +35,15 @@ impl From<CFRetained<CVPixelBuffer>> for SurfaceSource {
 
 /// A surface element.
 pub struct Surface {
+    #[cfg_attr(
+        not(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "freebsd"
+        )),
+        allow(dead_code)
+    )]
     source: SurfaceSource,
     object_fit: ObjectFit,
     orientation: SurfaceOrientation,
@@ -32,7 +51,12 @@ pub struct Surface {
 }
 
 /// Create a new surface element.
-#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "linux",
+    target_os = "freebsd"
+))]
 pub fn surface(source: impl Into<SurfaceSource>) -> Surface {
     Surface {
         source: source.into(),
@@ -98,40 +122,59 @@ impl Element for Surface {
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios")),
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "linux",
+                target_os = "freebsd"
+            )),
             allow(unused_variables)
         )]
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         #[cfg_attr(
-            not(any(target_os = "macos", target_os = "ios")),
+            not(any(
+                target_os = "macos",
+                target_os = "ios",
+                target_os = "linux",
+                target_os = "freebsd"
+            )),
             allow(unused_variables)
         )]
         window: &mut Window,
         _: &mut App,
     ) {
-        match &self.source {
-            #[cfg(any(target_os = "macos", target_os = "ios"))]
-            SurfaceSource::Surface(surface) => {
-                let size = self.orientation.displayed_size(crate::size(
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "ios",
+            target_os = "linux",
+            target_os = "freebsd"
+        ))]
+        {
+            let buffer_size = match &self.source {
+                #[cfg(any(target_os = "macos", target_os = "ios"))]
+                SurfaceSource::Surface(surface) => crate::size(
                     CVPixelBufferGetWidth(surface).into(),
                     CVPixelBufferGetHeight(surface).into(),
-                ));
-                let image_bounds = self.object_fit.get_bounds(bounds, size);
-                let mut style = Style::default();
-                style.refine(&self.style);
-                let corner_radii = style.corner_radii.to_pixels(window.rem_size());
-                window.paint_surface(
-                    bounds,
-                    image_bounds,
-                    corner_radii,
-                    self.orientation,
-                    surface.clone(),
-                );
-            }
-            #[allow(unreachable_patterns)]
-            _ => {}
+                ),
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                SurfaceSource::DmaBuf(frame) => {
+                    crate::size(frame.width.into(), frame.height.into())
+                }
+            };
+            let size = self.orientation.displayed_size(buffer_size);
+            let image_bounds = self.object_fit.get_bounds(bounds, size);
+            let mut style = Style::default();
+            style.refine(&self.style);
+            let corner_radii = style.corner_radii.to_pixels(window.rem_size());
+            window.paint_surface(
+                bounds,
+                image_bounds,
+                corner_radii,
+                self.orientation,
+                self.source.clone(),
+            );
         }
     }
 }
@@ -149,7 +192,9 @@ mod tests {
     use objc2_core_video::{CVPixelBufferCreate, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange};
 
     use super::*;
-    use crate::{Bounds, IntoElement as _, ParentElement as _, TestAppContext, div, point, px, size};
+    use crate::{
+        Bounds, IntoElement as _, ParentElement as _, TestAppContext, div, point, px, size,
+    };
 
     fn setup_buffer(width: usize, height: usize) -> CFRetained<CVPixelBuffer> {
         let mut buffer = ptr::null_mut();

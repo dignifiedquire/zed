@@ -3,7 +3,8 @@ use anyhow::{Context as _, Result};
 use block2::RcBlock;
 use gpui::{
     AtlasTextureId, Bounds, ContentMask, Corners, DevicePixels, PaintSurface, PaintedPath,
-    PrimitiveBatch, ScaledPixels, Scene, Size, point, quad_depth, quad_depth_scale, size,
+    PrimitiveBatch, ScaledPixels, Scene, Size, YCbCrCoding, YCbCrMatrix, point, quad_depth,
+    quad_depth_scale, size,
 };
 #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
 use image::RgbaImage;
@@ -1277,7 +1278,11 @@ impl MetalRenderer {
             let pixel_format = CVPixelBufferGetPixelFormatType(image_buffer);
             let coding = SurfaceCoding::of(pixel_format)
                 .with_context(|| format!("unsupported surface pixel format: {pixel_format:#x}"))?;
-            let ycbcr_to_rgb = coding.ycbcr_to_rgb(LumaWeights::of(image_buffer));
+            let ycbcr_to_rgb = YCbCrCoding {
+                matrix: matrix_of(image_buffer),
+                ..coding.coding
+            }
+            .ycbcr_to_rgb();
 
             let plane_texture = |plane, format| -> Result<CFRetained<CVMetalTexture>> {
                 let width = CVPixelBufferGetWidthOfPlane(image_buffer, plane);
@@ -1709,7 +1714,7 @@ enum SurfaceInputIndex {
 }
 
 /// The pixel formats surfaces draw, whether each is video range, and its bit depth.
-const SURFACE_FORMATS: [(u32, bool, u16); 4] = [
+const SURFACE_FORMATS: [(u32, bool, u8); 4] = [
     (kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, false, 8),
     (kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, true, 8),
     (kCVPixelFormatType_420YpCbCr10BiPlanarFullRange, false, 10),
@@ -1721,13 +1726,7 @@ const SURFACE_FORMATS: [(u32, bool, u16); 4] = [
 struct SurfaceCoding {
     luma_format: MTLPixelFormat,
     chroma_format: MTLPixelFormat,
-    /// The sample code a normalized texture value of 1 stands for.
-    scale: f32,
-    black: f32,
-    white: f32,
-    chroma_mid: f32,
-    /// The codes from the lowest chroma to the highest.
-    chroma_range: f32,
+    coding: YCbCrCoding,
 }
 
 impl SurfaceCoding {
@@ -1737,106 +1736,43 @@ impl SurfaceCoding {
             .iter()
             .find(|(format, ..)| *format == pixel_format)?;
         // Ten-bit samples sit in the high bits of 16-bit words.
-        let (luma_format, chroma_format, scale) = if bit_depth == 8 {
-            (MTLPixelFormat::R8Unorm, MTLPixelFormat::RG8Unorm, 255.0)
+        let (luma_format, chroma_format) = if bit_depth == 8 {
+            (MTLPixelFormat::R8Unorm, MTLPixelFormat::RG8Unorm)
         } else {
-            (
-                MTLPixelFormat::R16Unorm,
-                MTLPixelFormat::RG16Unorm,
-                65535.0 / 64.0,
-            )
-        };
-        let step = f32::from(1_u16 << (bit_depth - 8));
-        let max = f32::from((1_u16 << bit_depth) - 1);
-        let (black, white, chroma_range) = if is_video_range {
-            (16.0 * step, 235.0 * step, 224.0 * step)
-        } else {
-            (0.0, max, max)
+            (MTLPixelFormat::R16Unorm, MTLPixelFormat::RG16Unorm)
         };
         Some(Self {
             luma_format,
             chroma_format,
-            scale,
-            black,
-            white,
-            chroma_mid: 128.0 * step,
-            chroma_range,
+            coding: YCbCrCoding {
+                matrix: YCbCrMatrix::Bt601,
+                is_video_range,
+                bit_depth,
+            },
         })
     }
-
-    /// Returns the matrix turning a sampled `(y, cb, cr, 1)` into RGB, as ITU-T H.273
-    /// defines the conversion.
-    fn ycbcr_to_rgb(self, weights: LumaWeights) -> [[f32; 4]; 4] {
-        let LumaWeights { red, blue } = weights;
-        let green = 1.0 - red - blue;
-        let y_scale = self.scale / (self.white - self.black);
-        let y_offset = -self.black / (self.white - self.black);
-        let c_scale = self.scale / self.chroma_range;
-        let c_offset = -self.chroma_mid / self.chroma_range;
-        let red_cr = 2.0 * (1.0 - red);
-        let green_cb = -2.0 * blue * (1.0 - blue) / green;
-        let green_cr = -2.0 * red * (1.0 - red) / green;
-        let blue_cb = 2.0 * (1.0 - blue);
-        [
-            [y_scale, y_scale, y_scale, 0.0],
-            [0.0, green_cb * c_scale, blue_cb * c_scale, 0.0],
-            [red_cr * c_scale, green_cr * c_scale, 0.0, 0.0],
-            [
-                y_offset + red_cr * c_offset,
-                y_offset + (green_cb + green_cr) * c_offset,
-                y_offset + blue_cb * c_offset,
-                1.0,
-            ],
-        ]
-    }
 }
 
-/// The weights of red and blue in luma, as a colour matrix sets them.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct LumaWeights {
-    red: f32,
-    blue: f32,
-}
-
-impl LumaWeights {
-    const BT_601: Self = Self {
-        red: 0.299,
-        blue: 0.114,
+/// Returns the matrix `image_buffer` is tagged with. An untagged buffer keeps BT.601,
+/// which surfaces always used before.
+fn matrix_of(image_buffer: &CVPixelBuffer) -> YCbCrMatrix {
+    // SAFETY: The keys are static strings, and a null mode pointer is allowed.
+    let (attachment, bt_709, bt_2020, smpte_240m) = unsafe {
+        (
+            image_buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()),
+            kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+            kCVImageBufferYCbCrMatrix_ITU_R_2020,
+            kCVImageBufferYCbCrMatrix_SMPTE_240M_1995,
+        )
     };
-    const BT_709: Self = Self {
-        red: 0.2126,
-        blue: 0.0722,
-    };
-    const BT_2020: Self = Self {
-        red: 0.2627,
-        blue: 0.0593,
-    };
-    const SMPTE_240M: Self = Self {
-        red: 0.212,
-        blue: 0.087,
-    };
-
-    /// Returns the weights of the matrix `image_buffer` is tagged with. An untagged buffer
-    /// keeps BT.601, which surfaces always used before.
-    fn of(image_buffer: &CVPixelBuffer) -> Self {
-        // SAFETY: The keys are static strings, and a null mode pointer is allowed.
-        let (attachment, bt_709, bt_2020, smpte_240m) = unsafe {
-            (
-                image_buffer.attachment(kCVImageBufferYCbCrMatrixKey, ptr::null_mut()),
-                kCVImageBufferYCbCrMatrix_ITU_R_709_2,
-                kCVImageBufferYCbCrMatrix_ITU_R_2020,
-                kCVImageBufferYCbCrMatrix_SMPTE_240M_1995,
-            )
-        };
-        let matrix = attachment
-            .as_deref()
-            .and_then(|value| value.downcast_ref::<CFString>());
-        match matrix {
-            Some(matrix) if matrix == bt_709 => Self::BT_709,
-            Some(matrix) if matrix == bt_2020 => Self::BT_2020,
-            Some(matrix) if matrix == smpte_240m => Self::SMPTE_240M,
-            _ => Self::BT_601,
-        }
+    let matrix = attachment
+        .as_deref()
+        .and_then(|value| value.downcast_ref::<CFString>());
+    match matrix {
+        Some(matrix) if matrix == bt_709 => YCbCrMatrix::Bt709,
+        Some(matrix) if matrix == bt_2020 => YCbCrMatrix::Bt2020,
+        Some(matrix) if matrix == smpte_240m => YCbCrMatrix::Smpte240m,
+        _ => YCbCrMatrix::Bt601,
     }
 }
 

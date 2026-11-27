@@ -38,10 +38,6 @@ use gpui_util::post_inc;
 use gpui_util::{ResultExt, measure};
 use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use objc2_core_foundation::CFRetained;
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use objc2_core_video::CVPixelBuffer;
 use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use refineable::Refineable;
@@ -5730,14 +5726,19 @@ impl Window {
     /// inside `bounds` shows, with those bounds' corners rounded to `corner_radii`.
     ///
     /// This method should only be called as part of the paint phase of element drawing.
-    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "linux",
+        target_os = "freebsd"
+    ))]
     pub fn paint_surface(
         &mut self,
         bounds: Bounds<Pixels>,
         image_bounds: Bounds<Pixels>,
         corner_radii: Corners<Pixels>,
         orientation: crate::SurfaceOrientation,
-        image_buffer: CFRetained<CVPixelBuffer>,
+        source: crate::SurfaceSource,
     ) {
         use crate::PaintSurface;
 
@@ -5775,7 +5776,14 @@ impl Window {
             rounded_bounds,
             texture_bounds,
             orientation,
-            image_buffer,
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            image_buffer: match source {
+                crate::SurfaceSource::Surface(image_buffer) => image_buffer,
+            },
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            frame: match source {
+                crate::SurfaceSource::DmaBuf(frame) => frame,
+            },
         });
     }
 

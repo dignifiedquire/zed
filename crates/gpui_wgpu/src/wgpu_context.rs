@@ -450,6 +450,13 @@ impl WgpuContext {
                 Subpixel text antialiasing will be disabled."
             );
         }
+        // Surfaces draw video frames that decoders hand over in DMA-BUFs.
+        if adapter
+            .features()
+            .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+        {
+            required_features |= wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
+        }
 
         let color_atlas_texture_format = Self::select_color_texture_format(adapter)?;
         let base_limits = if Self::requires_texture_instance_data(adapter) {
@@ -485,7 +492,10 @@ impl WgpuContext {
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Option<Box<dyn wgpu::wgt::WgpuHasDisplayHandle>>) -> wgpu::Instance {
         wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN | wgpu::Backends::GL,
+            // wgpu's `WGPU_BACKEND` picks a backend, such as Vulkan where a software GL
+            // adapter would win but cannot import the DMA-BUFs of video surfaces.
+            backends: wgpu::Backends::from_env()
+                .unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::GL),
             flags: wgpu::InstanceFlags::default(),
             backend_options: wgpu::BackendOptions::default(),
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),

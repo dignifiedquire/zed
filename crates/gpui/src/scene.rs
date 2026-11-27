@@ -1178,6 +1178,134 @@ pub struct PaintSurface {
     pub orientation: SurfaceOrientation,
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     pub image_buffer: objc2_core_foundation::CFRetained<objc2_core_video::CVPixelBuffer>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    pub frame: std::sync::Arc<DmaBufFrame>,
+}
+
+/// A video frame in DMA-BUFs: a luma plane, and a chroma plane of interleaved Cb and Cr
+/// samples at half the width and height, as decoders export NV12.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[derive(Debug)]
+pub struct DmaBufFrame {
+    /// The width of the luma plane in samples.
+    pub width: u32,
+    /// The height of the luma plane in samples.
+    pub height: u32,
+    /// The plane of luma samples.
+    pub luma: DmaBufPlane,
+    /// The plane of interleaved Cb and Cr samples.
+    pub chroma: DmaBufPlane,
+    /// How the samples code colour.
+    pub coding: YCbCrCoding,
+    /// Whatever must stay alive while the frame may be drawn, such as the decoder's
+    /// surface behind the planes.
+    pub owner: Option<std::sync::Arc<dyn std::any::Any + Send + Sync>>,
+}
+
+/// Two frames are equal only when they are the same frame, as their planes are buffers
+/// that other processes may write.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl PartialEq for DmaBufFrame {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+impl Eq for DmaBufFrame {}
+
+/// A plane of a [`DmaBufFrame`] in a DMA-BUF.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[derive(Debug)]
+pub struct DmaBufPlane {
+    /// The DMA-BUF holding the plane.
+    pub fd: std::os::fd::OwnedFd,
+    /// The plane's first byte in the buffer.
+    pub offset: u32,
+    /// The bytes from one row of the plane to the next.
+    pub stride: u32,
+    /// The DRM format modifier of the buffer's layout.
+    pub modifier: u64,
+}
+
+/// The matrix of a YCbCr image, which sets the weights of red and blue in luma.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum YCbCrMatrix {
+    /// ITU-R BT.601, which standard-definition video and JPEG use.
+    #[default]
+    Bt601,
+    /// ITU-R BT.709, which high-definition video uses.
+    Bt709,
+    /// ITU-R BT.2020, which ultra-high-definition video uses.
+    Bt2020,
+    /// SMPTE 240M.
+    Smpte240m,
+}
+
+impl YCbCrMatrix {
+    /// Returns the weights of red and blue in luma.
+    fn luma_weights(self) -> (f32, f32) {
+        match self {
+            Self::Bt601 => (0.299, 0.114),
+            Self::Bt709 => (0.2126, 0.0722),
+            Self::Bt2020 => (0.2627, 0.0593),
+            Self::Smpte240m => (0.212, 0.087),
+        }
+    }
+}
+
+/// How a YCbCr image codes its samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct YCbCrCoding {
+    /// The matrix that mixes red, green and blue into luma and chroma.
+    pub matrix: YCbCrMatrix,
+    /// Whether luma runs from code 16 to 235 and chroma from 16 to 240, at 8 bits, rather
+    /// than over the whole range.
+    pub is_video_range: bool,
+    /// Bits per sample. A sample deeper than 8 bits sits in the high bits of a 16-bit word.
+    pub bit_depth: u8,
+}
+
+impl YCbCrCoding {
+    /// Returns the matrix turning a sampled `(y, cb, cr, 1)` into RGB, as ITU-T H.273
+    /// defines the conversion, for samples a texture normalizes to 0 to 1.
+    pub fn ycbcr_to_rgb(self) -> [[f32; 4]; 4] {
+        let (red, blue) = self.matrix.luma_weights();
+        let green = 1.0 - red - blue;
+        let bit_depth = self.bit_depth.clamp(8, 16);
+        let scale = if bit_depth == 8 {
+            255.0
+        } else {
+            65535.0 / f32::from(1_u16 << (16 - bit_depth))
+        };
+        let step = f32::from(1_u16 << (bit_depth - 8));
+        let max = (f32::from(1_u16 << (bit_depth - 8)) * 256.0) - 1.0;
+        let (black, white, chroma_range) = if self.is_video_range {
+            (16.0 * step, 235.0 * step, 224.0 * step)
+        } else {
+            (0.0, max, max)
+        };
+        let chroma_mid = 128.0 * step;
+        let y_scale = scale / (white - black);
+        let y_offset = -black / (white - black);
+        let c_scale = scale / chroma_range;
+        let c_offset = -chroma_mid / chroma_range;
+        let red_cr = 2.0 * (1.0 - red);
+        let green_cb = -2.0 * blue * (1.0 - blue) / green;
+        let green_cr = -2.0 * red * (1.0 - red) / green;
+        let blue_cb = 2.0 * (1.0 - blue);
+        [
+            [y_scale, y_scale, y_scale, 0.0],
+            [0.0, green_cb * c_scale, blue_cb * c_scale, 0.0],
+            [red_cr * c_scale, green_cr * c_scale, 0.0, 0.0],
+            [
+                y_offset + red_cr * c_offset,
+                y_offset + (green_cb + green_cr) * c_offset,
+                y_offset + blue_cb * c_offset,
+                1.0,
+            ],
+        ]
+    }
 }
 
 /// How a surface turns its image buffer for display.
@@ -1517,5 +1645,57 @@ mod tests {
         scene.insert_primitive(quad(5.));
         scene.pop_layer();
         assert_eq!(batch_labels(&mut scene), ["underlines (1)", "quads (1)"]);
+    }
+
+    fn rgb(coding: YCbCrCoding, codes: [f32; 3], word: f32) -> [f32; 3] {
+        let matrix = coding.ycbcr_to_rgb();
+        let sample = [codes[0] / word, codes[1] / word, codes[2] / word, 1.0];
+        let mut rgb = [0.0; 3];
+        for (channel, value) in rgb.iter_mut().enumerate() {
+            *value = (0..4).map(|row| matrix[row][channel] * sample[row]).sum();
+        }
+        rgb
+    }
+
+    fn assert_rgb(shown: [f32; 3], expected: [f32; 3]) {
+        let is_near = shown
+            .iter()
+            .zip(expected)
+            .all(|(shown, expected)| (shown - expected).abs() < 0.02);
+        assert!(is_near, "{shown:?} is not {expected:?}");
+    }
+
+    #[test]
+    fn video_range_bt709_codes_draw_white_black_and_red() {
+        let coding = YCbCrCoding {
+            matrix: YCbCrMatrix::Bt709,
+            is_video_range: true,
+            bit_depth: 8,
+        };
+        assert_rgb(rgb(coding, [235.0, 128.0, 128.0], 255.0), [1.0, 1.0, 1.0]);
+        assert_rgb(rgb(coding, [16.0, 128.0, 128.0], 255.0), [0.0, 0.0, 0.0]);
+        assert_rgb(rgb(coding, [63.0, 102.0, 240.0], 255.0), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn ten_bit_samples_in_the_high_bits_draw_as_their_codes_say() {
+        let coding = YCbCrCoding {
+            matrix: YCbCrMatrix::Bt709,
+            is_video_range: false,
+            bit_depth: 10,
+        };
+        let high_bits = |code: f32| code * 64.0;
+        let white = [high_bits(1023.0), high_bits(512.0), high_bits(512.0)];
+        assert_rgb(rgb(coding, white, 65535.0), [1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn full_range_bt601_codes_draw_red_as_jpeg_codes_it() {
+        let coding = YCbCrCoding {
+            matrix: YCbCrMatrix::Bt601,
+            is_video_range: false,
+            bit_depth: 8,
+        };
+        assert_rgb(rgb(coding, [76.0, 85.0, 255.0], 255.0), [1.0, 0.0, 0.0]);
     }
 }

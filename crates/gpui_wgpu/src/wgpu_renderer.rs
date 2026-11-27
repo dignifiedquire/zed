@@ -98,6 +98,16 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+    /// The bounds whose corners `corner_radii` round.
+    rounded_bounds: PodBounds,
+    corner_radii: [f32; 4],
+    /// The part of the frame the bounds show, in fractions of its size as displayed.
+    texture_bounds: PodBounds,
+    ycbcr_to_rgb: [[f32; 4]; 4],
+    /// The clockwise quarter turns of the frame.
+    rotation: u32,
+    is_mirrored: u32,
+    pad: [u32; 2],
 }
 
 #[repr(C)]
@@ -201,6 +211,8 @@ struct WgpuResources {
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     atlas_texture_bind_groups: FxHashMap<AtlasTextureId, CachedTextureBindGroup>,
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    surface_frames: crate::dma_buf::ImportedFrames,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
     instance_data: InstanceData,
@@ -1278,6 +1290,8 @@ impl WgpuRendererCore {
                 bind_group_layouts,
                 atlas_sampler,
                 atlas_texture_bind_groups: FxHashMap::default(),
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                surface_frames: Default::default(),
                 globals_buffer,
                 globals_bind_group,
                 instance_data,
@@ -1404,6 +1418,7 @@ impl WgpuRendererCore {
             bytemuck::bytes_of(&globals),
         );
         self.prepare_texture_bind_groups(scene);
+        let surface_bind_groups = self.prepare_surface_bind_groups(scene);
         self.ensure_depth_texture(size);
         let depth_view = &self
             .depth_texture
@@ -1542,9 +1557,11 @@ impl WgpuRendererCore {
                             &mut pass,
                         )?;
                     }
-                    // Surfaces are macOS-only for video playback and are not
-                    // implemented by the WGPU renderer.
-                    PrimitiveBatch::Surfaces(_surfaces) => {}
+                    PrimitiveBatch::Surfaces(range) => {
+                        if let Some(bind_groups) = surface_bind_groups.get(range) {
+                            self.draw_surfaces(bind_groups, &mut pass);
+                        }
+                    }
                     // Native views are only composited by the Metal renderer.
                     PrimitiveBatch::NativeViews(_) => {}
                 }
@@ -1700,6 +1717,106 @@ impl WgpuRendererCore {
                     bind_group,
                 },
             );
+        }
+    }
+
+    /// Returns a bind group per surface of `scene`, or `None` for a surface whose frame
+    /// the GPU cannot import.
+    fn prepare_surface_bind_groups(&mut self, scene: &Scene) -> Vec<Option<wgpu::BindGroup>> {
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            self.resources_mut().surface_frames.begin_frame();
+            scene
+                .surfaces
+                .iter()
+                .map(|surface| {
+                    let resources = self.resources_mut();
+                    let (luma, chroma) = resources
+                        .surface_frames
+                        .textures(&resources.device, &surface.frame)?;
+                    Some(self.create_surface_bind_group(surface, &luma, &chroma))
+                })
+                .collect()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            scene.surfaces.iter().map(|_| None).collect()
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    fn create_surface_bind_group(
+        &self,
+        surface: &gpui::PaintSurface,
+        luma: &wgpu::TextureView,
+        chroma: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        use wgpu::util::DeviceExt as _;
+
+        let corners = surface.corner_radii;
+        let texture_bounds = surface.texture_bounds;
+        let params = SurfaceParams {
+            bounds: surface.bounds.into(),
+            content_mask: surface.content_mask.bounds.into(),
+            rounded_bounds: surface.rounded_bounds.into(),
+            corner_radii: [
+                corners.top_left.as_f32(),
+                corners.top_right.as_f32(),
+                corners.bottom_right.as_f32(),
+                corners.bottom_left.as_f32(),
+            ],
+            texture_bounds: PodBounds {
+                origin: [texture_bounds.origin.x, texture_bounds.origin.y],
+                size: [texture_bounds.size.width, texture_bounds.size.height],
+            },
+            ycbcr_to_rgb: surface.frame.coding.ycbcr_to_rgb(),
+            rotation: surface.orientation.rotation as u32,
+            is_mirrored: u32::from(surface.orientation.is_mirrored),
+            pad: [0; 2],
+        };
+        let resources = self.resources();
+        let buffer = resources
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("surface_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        resources
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("surface_bind_group"),
+                layout: &resources.bind_group_layouts.surfaces,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(luma),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(chroma),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::Sampler(&resources.atlas_sampler),
+                    },
+                ],
+            })
+    }
+
+    fn draw_surfaces(
+        &self,
+        bind_groups: &[Option<wgpu::BindGroup>],
+        pass: &mut wgpu::RenderPass<'_>,
+    ) {
+        pass.set_pipeline(&self.resources().pipelines.surfaces);
+        for bind_group in bind_groups.iter().flatten() {
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.draw(0..4, 0..1);
         }
     }
 

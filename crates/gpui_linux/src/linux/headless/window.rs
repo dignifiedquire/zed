@@ -481,6 +481,228 @@ mod tests {
         Ok(())
     }
 
+    /// Returns a frame of `width` by `height` samples in a DMA-BUF of `/dev/udmabuf`,
+    /// whose sample at each point is `sample(x, y)` as luma, Cb and Cr.
+    fn setup_nv12_frame(
+        width: u32,
+        height: u32,
+        sample: impl Fn(u32, u32) -> [u8; 3],
+    ) -> anyhow::Result<gpui::DmaBufFrame> {
+        use std::{
+            fs::OpenOptions,
+            os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd},
+        };
+
+        #[repr(C)]
+        struct UdmabufCreate {
+            memfd: u32,
+            flags: u32,
+            offset: u64,
+            size: u64,
+        }
+        const UDMABUF_CREATE: libc::c_ulong = 0x4018_7542;
+        const UDMABUF_FLAGS_CLOEXEC: u32 = 1;
+
+        let luma_size = (width * height) as usize;
+        let mut bytes = vec![0_u8; luma_size + luma_size / 2];
+        for y in 0..height {
+            for x in 0..width {
+                bytes[(y * width + x) as usize] = sample(x, y)[0];
+            }
+        }
+        for y in 0..height / 2 {
+            for x in 0..width / 2 {
+                let [_, cb, cr] = sample(x * 2, y * 2);
+                let at = luma_size + (y * width + x * 2) as usize;
+                bytes[at] = cb;
+                bytes[at + 1] = cr;
+            }
+        }
+        let size = bytes.len().next_multiple_of(4096);
+        bytes.resize(size, 0);
+        // SAFETY: the name is a C string, and the flags are memfd_create's.
+        let memfd = unsafe { libc::memfd_create(c"nv12".as_ptr(), libc::MFD_ALLOW_SEALING) };
+        anyhow::ensure!(
+            memfd >= 0,
+            "memfd_create: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: memfd_create returned a new descriptor.
+        let memfd = unsafe { OwnedFd::from_raw_fd(memfd) };
+        let mut file = std::fs::File::from(memfd);
+        std::io::Write::write_all(&mut file, &bytes)?;
+        // SAFETY: the descriptor is open, and udmabuf needs the shrink seal.
+        let sealed =
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_ADD_SEALS, libc::F_SEAL_SHRINK) };
+        anyhow::ensure!(sealed == 0, "sealing: {}", std::io::Error::last_os_error());
+        let device = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/udmabuf")?;
+        let create = UdmabufCreate {
+            memfd: file.as_raw_fd() as u32,
+            flags: UDMABUF_FLAGS_CLOEXEC,
+            offset: 0,
+            size: size as u64,
+        };
+        // SAFETY: the request is UDMABUF_CREATE with its argument.
+        let buffer = unsafe { libc::ioctl(device.as_raw_fd(), UDMABUF_CREATE, &create) };
+        anyhow::ensure!(
+            buffer >= 0,
+            "UDMABUF_CREATE: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: the ioctl returned a new DMA-BUF descriptor.
+        let buffer = unsafe { OwnedFd::from_raw_fd(buffer) };
+        Ok(gpui::DmaBufFrame {
+            width,
+            height,
+            luma: gpui::DmaBufPlane {
+                fd: buffer.try_clone()?,
+                offset: 0,
+                stride: width,
+                modifier: 0,
+            },
+            chroma: gpui::DmaBufPlane {
+                fd: buffer,
+                offset: luma_size as u32,
+                stride: width,
+                modifier: 0,
+            },
+            coding: gpui::YCbCrCoding {
+                matrix: gpui::YCbCrMatrix::Bt709,
+                is_video_range: true,
+                bit_depth: 8,
+            },
+            owner: None,
+        })
+    }
+
+    const VIDEO_WHITE: [u8; 3] = [235, 128, 128];
+    const VIDEO_RED: [u8; 3] = [63, 102, 240];
+
+    fn draw_frame(
+        frame: gpui::DmaBufFrame,
+        orientation: gpui::SurfaceOrientation,
+    ) -> anyhow::Result<image::RgbaImage> {
+        let whole = Bounds {
+            origin: Point::default(),
+            size: Size {
+                width: 1.0,
+                height: 1.0,
+            },
+        };
+        draw_frame_part(frame, orientation, whole, Corners::default())
+    }
+
+    fn draw_frame_part(
+        frame: gpui::DmaBufFrame,
+        orientation: gpui::SurfaceOrientation,
+        texture_bounds: Bounds<f32>,
+        corner_radii: Corners<gpui::ScaledPixels>,
+    ) -> anyhow::Result<image::RgbaImage> {
+        let (window, _) = setup_window(64.0, 32.0);
+        let bounds = Bounds {
+            origin: Point::default(),
+            size: Size {
+                width: 64.0.into(),
+                height: 32.0.into(),
+            },
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(gpui::PaintSurface {
+            order: 0,
+            bounds,
+            content_mask: ContentMask { bounds },
+            corner_radii,
+            rounded_bounds: bounds,
+            texture_bounds,
+            orientation,
+            frame: Arc::new(frame),
+        });
+        scene.finish();
+        window.draw(&scene);
+        window.render_to_image(&scene)
+    }
+
+    fn assert_near(pixel: [u8; 4], expected: [u8; 3]) {
+        let is_near = pixel
+            .iter()
+            .zip(expected)
+            .all(|(shown, expected)| shown.abs_diff(expected) <= 3);
+        assert!(is_near, "{pixel:?} is not {expected:?}");
+    }
+
+    #[test]
+    #[ignore = "needs /dev/udmabuf, and WGPU_BACKEND=vulkan where a software GL adapter would win"]
+    fn surface_draws_a_dma_buf_frame_in_its_colours() -> anyhow::Result<()> {
+        let frame = setup_nv12_frame(64, 32, |x, _| if x < 32 { VIDEO_WHITE } else { VIDEO_RED })?;
+        let image = draw_frame(frame, gpui::SurfaceOrientation::default())?;
+        assert_near(image.get_pixel(16, 16).0, [255, 255, 255]);
+        assert_near(image.get_pixel(48, 16).0, [255, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "needs /dev/udmabuf, and WGPU_BACKEND=vulkan where a software GL adapter would win"]
+    fn quarter_turn_shows_the_frames_top_on_the_right() -> anyhow::Result<()> {
+        let frame = setup_nv12_frame(32, 64, |_, y| if y < 32 { VIDEO_WHITE } else { VIDEO_RED })?;
+        let orientation = gpui::SurfaceOrientation {
+            rotation: gpui::SurfaceRotation::Clockwise90,
+            is_mirrored: false,
+        };
+        let image = draw_frame(frame, orientation)?;
+        assert_near(image.get_pixel(48, 16).0, [255, 255, 255]);
+        assert_near(image.get_pixel(16, 16).0, [255, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "needs /dev/udmabuf, and WGPU_BACKEND=vulkan where a software GL adapter would win"]
+    fn texture_bounds_show_only_their_part_of_the_frame() -> anyhow::Result<()> {
+        let frame = setup_nv12_frame(64, 32, |x, _| if x < 32 { VIDEO_WHITE } else { VIDEO_RED })?;
+        let right_half = Bounds {
+            origin: Point { x: 0.5, y: 0.0 },
+            size: Size {
+                width: 0.5,
+                height: 1.0,
+            },
+        };
+        let image = draw_frame_part(
+            frame,
+            gpui::SurfaceOrientation::default(),
+            right_half,
+            Corners::default(),
+        )?;
+        assert_near(image.get_pixel(8, 16).0, [255, 0, 0]);
+        assert_near(image.get_pixel(56, 16).0, [255, 0, 0]);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "needs /dev/udmabuf, and WGPU_BACKEND=vulkan where a software GL adapter would win"]
+    fn rounded_surface_leaves_its_corners_to_the_background() -> anyhow::Result<()> {
+        let frame = setup_nv12_frame(64, 32, |_, _| VIDEO_WHITE)?;
+        let whole = Bounds {
+            origin: Point::default(),
+            size: Size {
+                width: 1.0,
+                height: 1.0,
+            },
+        };
+        let radius = gpui::ScaledPixels(16.0);
+        let corners = Corners {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+        let image = draw_frame_part(frame, gpui::SurfaceOrientation::default(), whole, corners)?;
+        assert_near(image.get_pixel(0, 0).0, [0, 0, 0]);
+        assert_near(image.get_pixel(32, 16).0, [255, 255, 255]);
+        Ok(())
+    }
+
     #[test]
     fn window_turns_its_accessibility_tree_on_at_once() {
         let (window, _) = setup_window(10.0, 10.0);
