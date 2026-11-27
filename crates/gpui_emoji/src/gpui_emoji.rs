@@ -137,6 +137,7 @@ mod tests {
             ("🏳\u{fe0f}\u{200d}🌈", Presentation::Emoji),
             ("©", Presentation::TextDefault),
             ("a", Presentation::Text),
+            ("\u{1fadd}", Presentation::Emoji),
         ];
         for (cluster, presentation) in expected {
             assert_eq!(Presentation::of(cluster), presentation, "{cluster:?}");

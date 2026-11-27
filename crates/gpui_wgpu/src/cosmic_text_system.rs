@@ -11,6 +11,7 @@ use gpui::{
     ShapedRun, SharedString, Size, TextRenderingMode, point, size,
 };
 
+use gpui_emoji::{emoji_presentation_clusters, emoji_scale};
 use itertools::Itertools;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
@@ -21,7 +22,6 @@ use swash::{
     tag_from_bytes,
     zeno::{Format, Vector},
 };
-use unicode_properties::{EmojiStatus, UnicodeEmoji as _};
 use unicode_segmentation::UnicodeSegmentation;
 
 // Keep in sync with the Linux list of `EMOJI_FONT_FAMILIES` in gpui's svg_renderer.rs.
@@ -355,7 +355,10 @@ impl CosmicTextSystemState {
         self.font_ids_by_family_cache.clear();
         let db = self.font_system.db_mut();
         for bytes in fonts {
-            db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
+            let loaded = db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
+            for id in loaded {
+                remove_other_faces_of_emoji_family(db, id);
+            }
         }
         self.emoji_face = find_emoji_face(self.font_system.db());
         Ok(())
@@ -611,10 +614,21 @@ impl CosmicTextSystemState {
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
         let pixel_size = if params.is_emoji && params.glyph_id.0 != 0 {
-            f32::from(params.font_size) * emoji_scale(params.font_size)
+            f32::from(params.font_size) * emoji_scale(f32::from(params.font_size))
         } else {
             f32::from(params.font_size)
         };
+        // swash draws COLRv1 glyphs blank, so gpui_emoji's painter draws COLR glyphs.
+        if params.is_emoji && params.glyph_id.0 != 0 {
+            let data = loaded_font.font.data();
+            if gpui_emoji::has_color_glyph(data, params.glyph_id.0) {
+                let pixels = pixel_size * params.scale_factor;
+                if let Some(image) = gpui_emoji::paint_color_glyph(data, params.glyph_id.0, pixels)
+                {
+                    return Ok(colour_image(image));
+                }
+            }
+        }
 
         let subpixel_offset = Vector::new(
             params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor,
@@ -918,7 +932,7 @@ impl CosmicTextSystemState {
             )
         });
 
-        let emoji_scale = emoji_scale(font_size);
+        let emoji_scale = emoji_scale(f32::from(font_size));
         // Emoji draw larger than shaped. Each entry holds an emoji's left edge and the advance
         // it gains, and the line's ascent and descent grow with the emoji font's.
         let mut emoji_growth: SmallVec<[(f32, f32); 4]> = SmallVec::new();
@@ -1394,112 +1408,61 @@ fn find_emoji_face(
     })
 }
 
-// swash paints CBDT and sbix bitmaps and COLR version 0 layers. It cannot paint
-// COLRv1, so a COLRv1-only font would draw nothing.
+// swash paints CBDT and sbix bitmaps and COLR version 0 layers, and gpui_emoji's
+// painter paints the BaseGlyphList of COLR version 1.
 fn has_paintable_color_glyphs(font: swash::FontRef) -> bool {
     let table = |tag| font.table(swash::tag_from_bytes(tag));
-    let has_colr_layers = table(b"COLR")
-        .and_then(|colr| colr.get(2..4))
-        .is_some_and(|base_glyph_count| base_glyph_count.iter().any(|byte| *byte != 0));
-    table(b"CBDT").is_some() || table(b"sbix").is_some() || has_colr_layers
+    let colr = table(b"COLR");
+    let is_set =
+        |field: Option<&[u8]>| field.is_some_and(|bytes| bytes.iter().any(|byte| *byte != 0));
+    let has_colr_layers = is_set(colr.and_then(|colr| colr.get(2..4)));
+    let has_colr_v1_glyphs =
+        colr.is_some_and(|colr| colr.get(0..2) == Some(&[0, 1]) && is_set(colr.get(14..18)));
+    table(b"CBDT").is_some() || table(b"sbix").is_some() || has_colr_layers || has_colr_v1_glyphs
 }
 
-/// How a grapheme cluster asks to be drawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Presentation {
-    Text,
-    /// As emoji where the primary font lacks it, as a text-default emoji
-    /// without a selector does.
-    TextDefault,
-    Emoji,
-}
-
-impl Presentation {
-    fn of(cluster: &str) -> Self {
-        if cluster.contains('\u{fe0e}') {
-            Self::Text
-        } else if cluster.chars().any(|character| {
-            matches!(character, '\u{fe0f}' | '\u{20e3}') || is_emoji_presentation(character)
-        }) {
-            Self::Emoji
-        } else if cluster.chars().any(is_text_default_emoji) {
-            Self::TextDefault
-        } else {
-            Self::Text
-        }
-    }
-}
-
-fn is_emoji_presentation(character: char) -> bool {
-    matches!(
-        character.emoji_status(),
-        EmojiStatus::EmojiPresentation
-            | EmojiStatus::EmojiPresentationAndModifierBase
-            | EmojiStatus::EmojiPresentationAndEmojiComponent
-            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
-    )
-}
-
-// The keycap bases are the only ASCII characters with Emoji=Yes, and they stay
-// text without a selector.
-fn is_text_default_emoji(character: char) -> bool {
-    !character.is_ascii()
-        && matches!(
-            character.emoji_status(),
-            EmojiStatus::EmojiOther
-                | EmojiStatus::EmojiModifierBase
-                | EmojiStatus::EmojiOtherAndEmojiComponent
-        )
-}
-
-/// Returns the byte ranges of the grapheme clusters in `text[run]` that the
-/// emoji font draws.
-fn emoji_presentation_clusters(
-    text: &str,
-    run: Range<usize>,
-    primary_covers: &impl Fn(char) -> bool,
-    emoji_font_covers: &impl Fn(char) -> bool,
-) -> SmallVec<[Range<usize>; 4]> {
-    let Some(run_text) = text.get(run.clone()) else {
-        return SmallVec::new();
+/// Removes the faces of `id`'s emoji family other than `id`, so that the copy of an
+/// emoji font the app adds draws in place of the system's.
+fn remove_other_faces_of_emoji_family(
+    db: &mut cosmic_text::fontdb::Database,
+    id: cosmic_text::fontdb::ID,
+) {
+    let Some(family) = db.face(id).and_then(|face| {
+        face.families
+            .iter()
+            .map(|(name, _)| name.clone())
+            .find(|name| EMOJI_FONT_FAMILIES.contains(&name.as_str()))
+    }) else {
+        return;
     };
-    if run_text.is_ascii() {
-        return SmallVec::new();
+    let others: Vec<_> = db
+        .faces()
+        .filter(|face| face.id != id && face.families.iter().any(|(name, _)| *name == family))
+        .map(|face| face.id)
+        .collect();
+    for other in others {
+        db.remove_face(other);
     }
-    run_text
-        .grapheme_indices(true)
-        .filter(|(_, cluster)| {
-            let Some(first) = cluster.chars().next() else {
-                return false;
-            };
-            let is_emoji = match Presentation::of(cluster) {
-                Presentation::Text => false,
-                Presentation::TextDefault => !primary_covers(first),
-                Presentation::Emoji => true,
-            };
-            is_emoji && emoji_font_covers(first)
-        })
-        .map(|(start, cluster)| {
-            let start = run.start + start;
-            start..start + cluster.len()
-        })
-        .collect()
+}
+
+/// Returns a glyph that gpui_emoji painted as swash's colour image, which the atlas takes.
+fn colour_image(image: gpui_emoji::ColorImage) -> swash::scale::image::Image {
+    swash::scale::image::Image {
+        source: Source::ColorOutline(0),
+        content: swash::scale::image::Content::Color,
+        placement: swash::zeno::Placement {
+            left: image.left,
+            top: image.top,
+            width: image.width,
+            height: image.height,
+        },
+        data: image.rgba,
+    }
 }
 
 fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     // TODO: Include other common emoji fonts
     postscript_name == "NotoColorEmoji"
-}
-
-/// Returns the factor emoji grow by at a font size.
-fn emoji_scale(font_size: Pixels) -> f32 {
-    // CoreText draws Apple Color Emoji 1.25 times as large up to 16 px, and the factor
-    // falls to 1 at 24 px. Noto Color Emoji's art fills about 1.1 times the em of Apple's,
-    // so 0.9 of that factor matches macOS. Large emoji keep their size. Other emoji fonts
-    // take the same factor as an approximation.
-    let size = f32::from(font_size);
-    let core_text_size = (size * 1.25).min(12. + size / 2.).max(size);
-    (0.9 * core_text_size / size).max(1.)
 }
 
 #[cfg(test)]
@@ -2200,6 +2163,9 @@ mod tests {
         include_bytes!("../test_data/dejavu-sans/DejaVuSans-Subset.ttf");
     const NOTO_COLOR_EMOJI_SUBSET: &[u8] =
         include_bytes!("../test_data/noto-color-emoji/NotoColorEmoji-Subset.ttf");
+    const NOTO_COLOR_EMOJI_COLRV1_SUBSET: &[u8] = include_bytes!(
+        "../../gpui_emoji/test_data/noto-color-emoji/NotoColorEmoji-COLRv1-Subset.ttf"
+    );
 
     // A subset of Noto Sans Hebrew 2.003, a variable font whose weight axis runs
     // from 100 to 900, made with fontTools' subset for "Hilm ".
@@ -2315,61 +2281,13 @@ mod tests {
     }
 
     #[test]
-    fn emoji_presentation_follows_selectors() {
-        let expected = [
-            ("❤\u{fe0f}", Presentation::Emoji),
-            ("❤", Presentation::TextDefault),
-            ("❤\u{fe0e}", Presentation::Text),
-            ("1\u{fe0f}\u{20e3}", Presentation::Emoji),
-            ("#\u{fe0f}\u{20e3}", Presentation::Emoji),
-            ("1", Presentation::Text),
-            ("#", Presentation::Text),
-            ("😀", Presentation::Emoji),
-            ("😀\u{fe0e}", Presentation::Text),
-            ("👋🏽", Presentation::Emoji),
-            ("☝🏻", Presentation::Emoji),
-            ("🇩🇪", Presentation::Emoji),
-            ("🏳\u{fe0f}\u{200d}🌈", Presentation::Emoji),
-            ("©", Presentation::TextDefault),
-            ("a", Presentation::Text),
-        ];
-        for (cluster, presentation) in expected {
-            assert_eq!(Presentation::of(cluster), presentation, "{cluster:?}");
-        }
-    }
-
-    fn drawn_clusters(
-        text: &str,
-        primary_covers: impl Fn(char) -> bool,
-        emoji_font_covers: impl Fn(char) -> bool,
-    ) -> Vec<&str> {
-        emoji_presentation_clusters(text, 3..text.len(), &primary_covers, &emoji_font_covers)
-            .into_iter()
-            .map(|range| &text[range])
-            .collect()
-    }
-
-    #[test]
-    fn emoji_presentation_clusters_span_whole_sequences() {
-        let text = "xx a ❤\u{fe0f} 1\u{fe0f}\u{20e3} ❤ 😀\u{fe0e} 😀";
-        let ascii = |character: char| character.is_ascii();
-        assert_eq!(
-            drawn_clusters(text, ascii, |_| true),
-            ["❤\u{fe0f}", "1\u{fe0f}\u{20e3}", "❤", "😀"]
-        );
-        let ascii_and_heart = |character: char| character.is_ascii() || character == '❤';
-        assert_eq!(
-            drawn_clusters(text, ascii_and_heart, |_| true),
-            ["❤\u{fe0f}", "1\u{fe0f}\u{20e3}", "😀"]
-        );
-        assert!(drawn_clusters(text, ascii, |_| false).is_empty());
-    }
-
-    #[test]
-    fn paintable_color_glyphs_need_bitmaps_or_colr_layers() {
+    fn paintable_color_glyphs_need_bitmaps_colr_layers_or_a_colr_v1_glyph_list() {
         let cmap: (&[u8; 4], &[u8]) = (b"cmap", &[0; 4]);
         assert!(is_paintable(&[(b"CBDT", &[0, 3, 0, 0]), cmap]));
         assert!(is_paintable(&[(b"COLR", &[0, 0, 0, 1, 0, 0, 0, 14]), cmap]));
+        let mut colr_v1 = vec![0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 34];
+        colr_v1.resize(34, 0);
+        assert!(is_paintable(&[(b"COLR", &colr_v1), cmap]));
         assert!(!is_paintable(&[
             (b"COLR", &[0, 1, 0, 0, 0, 0, 0, 34]),
             cmap
@@ -2403,6 +2321,75 @@ mod tests {
         assert_eq!(glyph_faces(&heart), [(dejavu, false)]);
         let selected = layout_in(&text_system, &font, "❤\u{fe0f}")?;
         assert_eq!(glyph_faces(&selected), [(emoji_font, true)]);
+        Ok(())
+    }
+
+    fn colored_pixels(text_system: &CosmicTextSystem, text: &str) -> Result<usize> {
+        let layout = layout_in(text_system, &plex_falling_back_to_dejavu(), text)?;
+        let run = layout.runs.first().context("no run")?;
+        let glyph = run.glyphs.first().context("no glyph")?;
+        anyhow::ensure!(glyph.is_emoji, "{text:?} drew as text");
+        let params = RenderGlyphParams {
+            font_id: run.font_id,
+            glyph_id: glyph.id,
+            font_size: gpui::px(32.0),
+            subpixel_variant: point(0, 0),
+            scale_factor: 1.0,
+            is_emoji: glyph.is_emoji,
+            subpixel_rendering: false,
+            dilation: 0,
+        };
+        let bounds = text_system.glyph_raster_bounds(&params)?;
+        let (_, pixels) = text_system.rasterize_glyph(&params, bounds)?;
+        Ok(pixels
+            .chunks_exact(4)
+            .filter(|pixel| {
+                let channels = pixel.iter().take(3);
+                let (min, max) = channels.fold((u8::MAX, u8::MIN), |(min, max), channel| {
+                    (min.min(*channel), max.max(*channel))
+                });
+                max - min > 48
+            })
+            .count())
+    }
+
+    #[test]
+    fn colrv1_emoji_rasterize_in_color() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_COLRV1_SUBSET])?;
+        for text in ["😀", "❤\u{fe0f}", "🇩🇪", "🔥"] {
+            let colored = colored_pixels(&text_system, text)?;
+            assert!(colored >= 300, "{text:?}: {colored} coloured pixels");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn added_emoji_font_replaces_the_systems_copy_of_its_family() -> Result<()> {
+        let text_system =
+            emoji_text_system(&[IBM_PLEX, DEJAVU_SANS_SUBSET, NOTO_COLOR_EMOJI_SUBSET])?;
+        text_system.add_fonts(vec![Cow::Borrowed(NOTO_COLOR_EMOJI_COLRV1_SUBSET)])?;
+        let emoji_font = emoji_font_id(&text_system)?;
+        let layout = layout_in(&text_system, &plex_falling_back_to_dejavu(), "😀")?;
+        assert_eq!(glyph_faces(&layout), [(emoji_font, true)]);
+        let state = text_system.0.read();
+        let font = state.loaded_fonts[emoji_font.0].font.as_swash();
+        assert!(font.table(swash::tag_from_bytes(b"COLR")).is_some());
+        assert!(font.table(swash::tag_from_bytes(b"CBDT")).is_none());
+        let copies = state
+            .font_system
+            .db()
+            .faces()
+            .filter(|face| {
+                face.families
+                    .iter()
+                    .any(|(name, _)| name == "Noto Color Emoji")
+            })
+            .count();
+        assert_eq!(copies, 1);
+        drop(state);
+        let colored = colored_pixels(&text_system, "😀")?;
+        assert!(colored >= 300, "{colored} coloured pixels");
         Ok(())
     }
 

@@ -16,5 +16,5 @@ doctest = false
 skrifa = "0.44"
 smallvec.workspace = true
 tiny-skia = { version = "0.11.4", default-features = false, features = ["std", "simd"] }
-unicode-properties = "=0.1.3"
+unicode-properties = "=0.1.5"
 unicode-segmentation.workspace = true
