@@ -2,6 +2,7 @@
 use crate::{WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]
 use anyhow::Context as _;
+use gpui::DmaBufImport;
 #[cfg(not(target_family = "wasm"))]
 use gpui_util::ResultExt;
 use parking_lot::Mutex;
@@ -18,6 +19,7 @@ pub struct WgpuContext {
     backend: WgpuBackend,
     dual_source_blending: bool,
     color_texture_format: wgpu::TextureFormat,
+    dma_buf: Option<DmaBufImport>,
     errors: Arc<DeviceErrorState>,
 }
 
@@ -309,6 +311,10 @@ impl WgpuContext {
             adapter.get_info().backend
         );
         let backend = WgpuBackend::Native(adapter.get_info().backend);
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        let dma_buf = crate::dma_buf::query_import(&adapter, &device);
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        let dma_buf = None;
 
         Self {
             instance,
@@ -318,6 +324,7 @@ impl WgpuContext {
             backend,
             dual_source_blending,
             color_texture_format,
+            dma_buf,
             errors,
         }
     }
@@ -429,6 +436,7 @@ impl WgpuContext {
             backend,
             dual_source_blending,
             color_texture_format,
+            dma_buf: None,
             errors,
         };
         Ok(PreparedWebGraphics { context, surface })
@@ -764,6 +772,10 @@ impl WgpuContext {
 
     pub fn color_texture_format(&self) -> wgpu::TextureFormat {
         self.color_texture_format
+    }
+
+    pub fn dma_buf(&self) -> Option<&DmaBufImport> {
+        self.dma_buf.as_ref()
     }
 
     /// Returns true if the GPU device was lost (e.g., due to driver crash, suspend/resume).

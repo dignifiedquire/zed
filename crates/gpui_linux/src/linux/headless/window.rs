@@ -702,6 +702,25 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs /dev/udmabuf"]
+    fn dma_buf_report_matches_whether_surfaces_draw_frames() -> anyhow::Result<()> {
+        let frame = setup_nv12_frame(64, 32, |_, _| VIDEO_WHITE)?;
+        let image = draw_frame(frame, gpui::SurfaceOrientation::default())?;
+        let did_draw = image.get_pixel(32, 16).0[0] > 128;
+        let (window, _) = setup_window(64.0, 32.0);
+        let specs = window
+            .0
+            .borrow()
+            .frames
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.gpu_specs())
+            .ok_or_else(|| anyhow::anyhow!("no GPU adapter"))?;
+        assert_eq!(specs.dma_buf.is_some(), did_draw, "{specs:?}");
+        Ok(())
+    }
+
+    #[test]
     fn window_turns_its_accessibility_tree_on_at_once() {
         let (window, _) = setup_window(10.0, 10.0);
         let activations = Arc::new(AtomicUsize::new(0));

@@ -3,8 +3,8 @@ use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use collections::FxHashMap;
 use gpui::{
-    AtlasTextureId, Bounds, DevicePixels, GpuSpecs, PaintedPath, PrimitiveBatch, ScaledPixels,
-    Scene, Size, get_gamma_correction_ratios, quad_depth, quad_depth_scale,
+    AtlasTextureId, Bounds, DevicePixels, DmaBufImport, GpuSpecs, PaintedPath, PrimitiveBatch,
+    ScaledPixels, Scene, Size, get_gamma_correction_ratios, quad_depth, quad_depth_scale,
 };
 use log::warn;
 #[cfg(not(target_family = "wasm"))]
@@ -236,6 +236,7 @@ struct WgpuRendererCore {
     dual_source_blending: bool,
     transient_attachments: bool,
     adapter_info: wgpu::AdapterInfo,
+    dma_buf: Option<DmaBufImport>,
     depth_texture: Option<DepthTexture>,
     /// Read by the headless renderer to create its render target.
     #[cfg(all(
@@ -1085,17 +1086,7 @@ impl WgpuRenderer {
     /// Returns `None` once GPU resources have been released by `destroy` or a pending
     /// device recovery.
     pub fn gpu_specs(&self) -> Option<GpuSpecs> {
-        let core = self.core()?;
-        let adapter_info = &core.adapter_info;
-        let features = core.resources.device.features();
-        Some(GpuSpecs {
-            is_software_emulated: adapter_info.device_type == wgpu::DeviceType::Cpu,
-            device_name: adapter_info.name.clone(),
-            driver_name: adapter_info.driver.clone(),
-            driver_info: adapter_info.driver_info.clone(),
-            draws_dma_buf_surfaces: features
-                .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF),
-        })
+        self.core().map(WgpuRendererCore::gpu_specs)
     }
 
     pub fn max_texture_size(&self) -> u32 {
@@ -1311,6 +1302,7 @@ impl WgpuRendererCore {
             dual_source_blending,
             transient_attachments: context.supports_transient_attachments(),
             adapter_info: context.adapter.get_info(),
+            dma_buf: context.dma_buf().cloned(),
             depth_texture: None,
             #[cfg(all(
                 not(target_family = "wasm"),
@@ -1323,6 +1315,17 @@ impl WgpuRendererCore {
 
     fn resources(&self) -> &WgpuResources {
         &self.resources
+    }
+
+    fn gpu_specs(&self) -> GpuSpecs {
+        let adapter_info = &self.adapter_info;
+        GpuSpecs {
+            is_software_emulated: adapter_info.device_type == wgpu::DeviceType::Cpu,
+            device_name: adapter_info.name.clone(),
+            driver_name: adapter_info.driver.clone(),
+            driver_info: adapter_info.driver_info.clone(),
+            dma_buf: self.dma_buf.clone(),
+        }
     }
 
     fn rebuild_pipelines(
@@ -2429,6 +2432,10 @@ impl WgpuHeadlessRenderer {
             render_target: None,
             observed_error_generation,
         })
+    }
+
+    pub fn gpu_specs(&self) -> GpuSpecs {
+        self.core.gpu_specs()
     }
 
     fn ensure_render_target(&mut self, size: Size<DevicePixels>) -> anyhow::Result<()> {

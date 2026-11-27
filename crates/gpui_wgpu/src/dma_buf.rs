@@ -1,10 +1,12 @@
 //! Video frames in DMA-BUFs, imported into wgpu's Vulkan backend as the luma and chroma
 //! textures of the surface shader.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
-use gpui::{DmaBufFrame, DmaBufPlane};
+use ash::{ext, khr, vk};
+use gpui::{DmaBufFrame, DmaBufImport, DmaBufPlane};
 
 /// How many drawn frames an import outlives its last draw, so that a frame the GPU may
 /// still sample stays alive and unchanged.
@@ -196,8 +198,6 @@ fn import_plane(
 /// Takes `images` over from the producer of their DMA-BUFs, in the layout shaders read,
 /// on the queue's next submission.
 fn acquire(device: &wgpu::Device, queue: &wgpu::Queue, images: &[ash::vk::Image]) -> Result<()> {
-    use ash::vk;
-
     // SAFETY: the guard only lends the device's handles, and drops before the encoder.
     let hal = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }
         .context("the device is not a Vulkan device")?;
@@ -248,4 +248,124 @@ fn acquire(device: &wgpu::Device, queue: &wgpu::Queue, images: &[ash::vk::Image]
     recorded.context("the command encoder is not recording")?;
     queue.submit(std::iter::once(encoder.finish()));
     Ok(())
+}
+
+pub(crate) fn query_import(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<DmaBufImport> {
+    if !device
+        .features()
+        .contains(wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF)
+    {
+        return None;
+    }
+    let import = query_properties(adapter).unwrap_or_else(|error| {
+        log::warn!("the GPU's DMA-BUF import is unknown: {error:#}");
+        DmaBufImport::default()
+    });
+    Some(import)
+}
+
+fn query_properties(adapter: &wgpu::Adapter) -> Result<DmaBufImport> {
+    // SAFETY: the guard only lends the adapter's handles to the queries below.
+    let adapter = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() }
+        .context("the adapter is not a Vulkan adapter")?;
+    let shared = adapter.shared_instance();
+    ensure!(
+        shared
+            .extensions()
+            .contains(&khr::get_physical_device_properties2::NAME),
+        "the Vulkan instance lacks VK_KHR_get_physical_device_properties2"
+    );
+    let instance =
+        khr::get_physical_device_properties2::Instance::new(shared.entry(), shared.raw_instance());
+    let physical_device = adapter.raw_physical_device();
+    let render_node = if adapter
+        .physical_device_capabilities()
+        .supports_extension(ext::physical_device_drm::NAME)
+    {
+        query_render_node(&instance, physical_device)
+    } else {
+        None
+    };
+    let luma = query_modifiers(&instance, physical_device, vk::Format::R8_UNORM);
+    let chroma = query_modifiers(&instance, physical_device, vk::Format::R8G8_UNORM);
+    let import = DmaBufImport {
+        render_node,
+        modifiers: luma.intersection(&chroma).copied().collect(),
+    };
+    Ok(import)
+}
+
+fn query_render_node(
+    instance: &khr::get_physical_device_properties2::Instance,
+    physical_device: vk::PhysicalDevice,
+) -> Option<(u32, u32)> {
+    let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+    // SAFETY: the physical device has VK_EXT_physical_device_drm, and its properties extend
+    // the query.
+    unsafe {
+        instance.get_physical_device_properties2(
+            physical_device,
+            &mut vk::PhysicalDeviceProperties2::default().push_next(&mut drm),
+        );
+    }
+    if drm.has_render != vk::TRUE {
+        return None;
+    }
+    let render_node = u32::try_from(drm.render_major)
+        .ok()
+        .zip(u32::try_from(drm.render_minor).ok());
+    if render_node.is_none() {
+        log::warn!(
+            "the GPU's render node {}:{} is out of range",
+            drm.render_major,
+            drm.render_minor
+        );
+    }
+    render_node
+}
+
+fn query_modifiers(
+    instance: &khr::get_physical_device_properties2::Instance,
+    physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+) -> BTreeSet<u64> {
+    let mut list = vk::DrmFormatModifierPropertiesListEXT::default();
+    // SAFETY: DMA-BUF import implies VK_EXT_image_drm_format_modifier, and its list extends the
+    // query. A list without an array takes only the count.
+    unsafe {
+        instance.get_physical_device_format_properties2(
+            physical_device,
+            format,
+            &mut vk::FormatProperties2::default().push_next(&mut list),
+        );
+    }
+    let mut properties = vec![
+        vk::DrmFormatModifierPropertiesEXT::default();
+        list.drm_format_modifier_count as usize
+    ];
+    let mut list = vk::DrmFormatModifierPropertiesListEXT::default()
+        .drm_format_modifier_properties(&mut properties);
+    // SAFETY: as above, and the list's count is the length of its array.
+    unsafe {
+        instance.get_physical_device_format_properties2(
+            physical_device,
+            format,
+            &mut vk::FormatProperties2::default().push_next(&mut list),
+        );
+    }
+    let written = list.drm_format_modifier_count as usize;
+    properties.truncate(written);
+    // The surface shader samples both planes with linear filtering.
+    let features =
+        vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR;
+    properties
+        .into_iter()
+        .filter(|modifier| {
+            modifier.drm_format_modifier_plane_count == 1
+                && modifier
+                    .drm_format_modifier_tiling_features
+                    .contains(features)
+        })
+        .map(|modifier| modifier.drm_format_modifier)
+        .collect()
 }
