@@ -1935,13 +1935,14 @@ unsafe fn username_and_password(credential: &CREDENTIALW) -> Result<(String, Vec
 mod tests {
     use std::ffi::{OsStr, OsString};
 
-    use crate::clipboard::read_raw_clipboard_text;
+    use crate::clipboard::{read_raw_clipboard_bytes, read_raw_clipboard_text};
     use crate::{read_from_clipboard, write_to_clipboard};
-    use gpui::ClipboardItem;
+    use gpui::{ClipboardItem, Image, ImageFormat};
     use windows::Win32::Security::Credentials::{
         CRED_PERSIST_SESSION, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW,
         CredWriteW,
     };
+    use windows::Win32::System::Ole::{CF_DIB, CF_DIBV5};
     use windows::core::{PCWSTR, PWSTR};
 
     use super::{encode_restart_arguments, username_and_password};
@@ -2056,5 +2057,31 @@ mod tests {
                 vec![6],
             )),
         );
+
+        // An image, an opaque red pixel beside a fully transparent black one,
+        // also reaches apps reading only the CF_DIB Windows makes from the
+        // CF_DIBV5, with the transparent pixel white.
+        let mut png = Vec::new();
+        image::RgbaImage::from_raw(2, 1, vec![255, 0, 0, 255, 0, 0, 0, 0])
+            .unwrap()
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let item = ClipboardItem::new_image(&Image::from_bytes(ImageFormat::Png, png));
+        write_to_clipboard(item.clone());
+        assert_eq!(read_from_clipboard(), Some(item));
+
+        let dibv5 = read_raw_clipboard_bytes(CF_DIBV5.0 as u32).unwrap();
+        assert_eq!(&dibv5[124..], &[0, 0, 255, 255, 255, 255, 255, 0]);
+
+        // The CF_DIB holds a BITMAPINFOHEADER, the masks of BI_BITFIELDS, then
+        // the pixels.
+        let dib = read_raw_clipboard_bytes(CF_DIB.0 as u32).unwrap();
+        let header = u32::from_le_bytes(dib[0..4].try_into().unwrap()) as usize;
+        let compression = u32::from_le_bytes(dib[16..20].try_into().unwrap());
+        let bit_count = u16::from_le_bytes(dib[14..16].try_into().unwrap());
+        let pixels = header + if compression == 3 { 12 } else { 0 };
+        assert_eq!(bit_count, 32);
+        assert_eq!(&dib[pixels..pixels + 3], &[0, 0, 255]);
+        assert_eq!(&dib[pixels + 4..pixels + 7], &[255, 255, 255]);
     }
 }

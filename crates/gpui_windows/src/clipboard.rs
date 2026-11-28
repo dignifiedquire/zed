@@ -5,6 +5,7 @@ use collections::FxHashMap;
 use itertools::Itertools;
 use windows::Win32::{
     Foundation::{HANDLE, HGLOBAL},
+    Graphics::Gdi::BI_BITFIELDS,
     System::{
         DataExchange::{
             CloseClipboard, CountClipboardFormats, EmptyClipboard, EnumClipboardFormats,
@@ -12,7 +13,7 @@ use windows::Win32::{
             SetClipboardData,
         },
         Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
-        Ole::{CF_DIB, CF_HDROP, CF_UNICODETEXT},
+        Ole::{CF_DIB, CF_DIBV5, CF_HDROP, CF_UNICODETEXT},
     },
     UI::Shell::{DragQueryFileW, HDROP},
 };
@@ -217,7 +218,74 @@ fn write_image(item: &Image) -> Result<()> {
             set_clipboard_bytes(&png_bytes, *CLIPBOARD_PNG_FORMAT)?;
         }
     }
+
+    // Also provide a DIB, which Windows turns into CF_DIB and CF_BITMAP for
+    // apps that read only those, such as Paint.
+    if item.format != ImageFormat::Svg {
+        if let Some(dib) = convert_to_dibv5(item.bytes(), item.format) {
+            set_clipboard_bytes(&dib, CF_DIBV5.0 as u32)?;
+        }
+    }
     Ok(())
+}
+
+/// The size of a BITMAPV5HEADER.
+const BITMAPV5HEADER_SIZE: u32 = 124;
+/// The colour space tag `LCS_sRGB`.
+const LCS_SRGB: u32 = u32::from_be_bytes(*b"sRGB");
+/// The rendering intent `LCS_GM_IMAGES`.
+const LCS_GM_IMAGES: u32 = 4;
+
+/// Returns the image as a bottom-up 32-bit `CF_DIBV5` with straight alpha.
+/// Fully transparent pixels turn white, so that apps ignoring alpha, which
+/// read the `CF_DIB` Windows makes from it, show them as white paper.
+fn convert_to_dibv5(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
+    let img_format = gpui_to_image_format(format)?;
+    let image = image::load_from_memory_with_format(bytes, img_format)
+        .map_err(|e| log::warn!("Failed to decode image for DIB conversion: {e}"))
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    let pixels_size = width.checked_mul(height)?.checked_mul(4)?;
+    let mut dib = Vec::with_capacity((BITMAPV5HEADER_SIZE + pixels_size) as usize);
+    for field in [BITMAPV5HEADER_SIZE, width, height] {
+        dib.extend_from_slice(&field.to_le_bytes());
+    }
+    dib.extend_from_slice(&1u16.to_le_bytes()); // bV5Planes
+    dib.extend_from_slice(&32u16.to_le_bytes()); // bV5BitCount
+    let fields = [
+        BI_BITFIELDS.0,
+        pixels_size,
+        0,           // bV5XPelsPerMeter
+        0,           // bV5YPelsPerMeter
+        0,           // bV5ClrUsed
+        0,           // bV5ClrImportant
+        0x00FF_0000, // bV5RedMask
+        0x0000_FF00, // bV5GreenMask
+        0x0000_00FF, // bV5BlueMask
+        0xFF00_0000, // bV5AlphaMask
+        LCS_SRGB,
+    ];
+    for field in fields {
+        dib.extend_from_slice(&field.to_le_bytes());
+    }
+    // bV5Endpoints and the three gamma values, unused for sRGB.
+    dib.extend_from_slice(&[0; 48]);
+    for field in [LCS_GM_IMAGES, 0, 0, 0] {
+        dib.extend_from_slice(&field.to_le_bytes());
+    }
+    for row in image.rows().rev() {
+        for pixel in row {
+            let [red, green, blue, alpha] = pixel.0;
+            let [red, green, blue] = if alpha == 0 {
+                [u8::MAX; 3]
+            } else {
+                [red, green, blue]
+            };
+            dib.extend_from_slice(&[blue, green, red, alpha]);
+        }
+    }
+    Some(dib)
 }
 
 fn convert_to_png(bytes: &[u8], format: ImageFormat) -> Option<Vec<u8>> {
@@ -399,4 +467,10 @@ impl Drop for LockedGlobal {
 pub(crate) fn read_raw_clipboard_text() -> Option<String> {
     let _clip = ClipboardGuard::open()?;
     get_clipboard_string(CF_UNICODETEXT.0 as u32)
+}
+
+#[cfg(test)]
+pub(crate) fn read_raw_clipboard_bytes(format: u32) -> Option<Vec<u8>> {
+    let _clip = ClipboardGuard::open()?;
+    Some(get_clipboard_data(format)?.as_bytes().to_vec())
 }
