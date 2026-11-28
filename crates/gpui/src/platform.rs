@@ -460,10 +460,10 @@ pub trait Platform: 'static {
     /// of the OS-wide setting. Pass `None` to clear the override and follow the system
     /// again. The override is reflected by [`Platform::window_appearance`].
     ///
-    /// Currently only implemented on macOS, where it sets `NSApplication.appearance` so
-    /// the native window chrome (the window border and titlebar) of every window matches
-    /// a dark app theme even when the system is in light mode (or vice versa). A no-op on
-    /// other platforms.
+    /// Implemented on macOS, where it sets `NSApplication.appearance` so the native window
+    /// chrome (the window border and titlebar) of every window matches a dark app theme even
+    /// when the system is in light mode (or vice versa), and on Windows, where it sets the
+    /// frames' `DWMWA_USE_IMMERSIVE_DARK_MODE`. A no-op on other platforms.
     fn set_window_appearance(&self, _appearance: Option<WindowAppearance>) {}
 
     /// Returns the window button layout configuration when supported.

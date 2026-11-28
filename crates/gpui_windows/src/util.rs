@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::{cell::Cell, sync::OnceLock};
 
 use gpui_util::ResultExt;
 use windows::{
@@ -126,8 +126,26 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
     )
 }
 
+thread_local! {
+    /// The appearance `Platform::set_window_appearance` forces on every window's frame, if any.
+    static FORCED_APPEARANCE: Cell<Option<WindowAppearance>> = const { Cell::new(None) };
+}
+
+/// Forces `appearance` on the frame of every window, or lets the frames follow the system again
+/// for `None`. Windows opened later and later system changes keep it.
+pub(crate) fn force_appearance(appearance: Option<WindowAppearance>) {
+    FORCED_APPEARANCE.with(|forced| forced.set(appearance));
+}
+
+/// Returns the appearance forced on the windows' frames, if any.
+pub(crate) fn forced_appearance() -> Option<WindowAppearance> {
+    FORCED_APPEARANCE.with(Cell::get)
+}
+
 /// This function is used to configure the dark mode for the window built-in title bar.
+/// An appearance forced by `force_appearance` wins over `appearance`.
 pub(crate) fn configure_dwm_dark_mode(hwnd: HWND, appearance: WindowAppearance) {
+    let appearance = forced_appearance().unwrap_or(appearance);
     let dark_mode_enabled: BOOL = match appearance {
         WindowAppearance::Dark | WindowAppearance::VibrantDark => true.into(),
         WindowAppearance::Light | WindowAppearance::VibrantLight => false.into(),
@@ -168,4 +186,67 @@ pub(crate) fn system_appearance() -> Result<WindowAppearance> {
 #[inline(always)]
 fn is_color_light(color: &Color) -> bool {
     ((5 * color.G as u32) + (2 * color.R as u32) + color.B as u32) > (8 * 128)
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::WindowAppearance;
+    use windows::{
+        Win32::{
+            Foundation::HWND,
+            Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmGetWindowAttribute},
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+            },
+        },
+        core::{BOOL, w},
+    };
+
+    use super::{configure_dwm_dark_mode, force_appearance};
+
+    fn frame_is_dark(hwnd: HWND) -> bool {
+        let mut dark = BOOL::default();
+        unsafe {
+            DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                &mut dark as *mut _ as _,
+                std::mem::size_of::<BOOL>() as u32,
+            )
+        }
+        .unwrap();
+        dark.as_bool()
+    }
+
+    #[test]
+    fn test_forced_appearance_wins_over_the_system_until_cleared() {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("gpui-test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+
+        force_appearance(Some(WindowAppearance::Dark));
+        configure_dwm_dark_mode(hwnd, WindowAppearance::Light);
+        let forced = frame_is_dark(hwnd);
+        force_appearance(None);
+        configure_dwm_dark_mode(hwnd, WindowAppearance::Light);
+        let followed = frame_is_dark(hwnd);
+        unsafe { DestroyWindow(hwnd) }.unwrap();
+
+        assert!(forced);
+        assert!(!followed);
+    }
 }

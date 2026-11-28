@@ -773,7 +773,15 @@ impl Platform for WindowsPlatform {
     }
 
     fn window_appearance(&self) -> WindowAppearance {
-        system_appearance().log_err().unwrap_or_default()
+        forced_appearance().unwrap_or_else(|| system_appearance().log_err().unwrap_or_default())
+    }
+
+    fn set_window_appearance(&self, appearance: Option<WindowAppearance>) {
+        force_appearance(appearance);
+        let system = system_appearance().log_err().unwrap_or_default();
+        for window in self.raw_window_handles.read().iter() {
+            configure_dwm_dark_mode(window.as_raw(), system);
+        }
     }
 
     fn open_url(&self, url: &str) {
